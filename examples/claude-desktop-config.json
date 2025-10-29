@@ -1,0 +1,11 @@
+{
+  "$schema": "https://modelcontextprotocol.io/schemas/2024-11-05/claude-desktop-config.schema.json",
+  "mcpServers": {
+    "pipeops": {
+      "command": "pipeops-mcp-server",
+      "env": {
+        "PIPEOPS_TOKEN": "your-api-token-here"
+      }
+    }
+  }
+}
