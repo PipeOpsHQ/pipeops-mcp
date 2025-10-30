@@ -1,6 +1,6 @@
 module github.com/PipeOpsHQ/pipeops-mcp-server
 
-go 1.25.3
+go 1.23.3
 
 require github.com/PipeOpsHQ/pipeops-go-sdk v0.2.6
 
