@@ -1,0 +1,53 @@
+{
+  "$schema": "https://github.com/modelcontextprotocol/registry/raw/main/schema/mcp.schema.json",
+  "name": "pipeops",
+  "displayName": "PipeOps",
+  "description": "Model Context Protocol server for interacting with PipeOps platform - manage projects, servers, deployments, environments, and more",
+  "category": "DevOps",
+  "homepage": "https://github.com/PipeOpsHQ/pipeops-mcp",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/PipeOpsHQ/pipeops-mcp.git"
+  },
+  "runtime": {
+    "type": "binary",
+    "install": {
+      "go": "go install github.com/PipeOpsHQ/pipeops-mcp-server/cmd/pipeops-mcp-server@latest"
+    },
+    "command": "pipeops-mcp-server"
+  },
+  "config": {
+    "env": {
+      "PIPEOPS_TOKEN": {
+        "description": "PipeOps API token for authentication",
+        "required": true,
+        "secret": true
+      },
+      "PIPEOPS_EMAIL": {
+        "description": "PipeOps email (alternative to token)",
+        "required": false
+      },
+      "PIPEOPS_PASSWORD": {
+        "description": "PipeOps password (alternative to token)",
+        "required": false,
+        "secret": true
+      },
+      "PIPEOPS_BASE_URL": {
+        "description": "PipeOps API base URL",
+        "required": false,
+        "default": "https://api.pipeops.io"
+      }
+    }
+  },
+  "features": [
+    "Project management (list, create, update, delete, deploy)",
+    "Server management and provisioning",
+    "Environment configuration",
+    "Team and workspace management",
+    "Billing and usage information",
+    "Add-on and integration management",
+    "User profile management",
+    "Cloud provider integration"
+  ]
+}

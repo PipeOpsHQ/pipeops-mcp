@@ -60,3 +60,9 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
+
+      - name: Submit to MCP Registry
+        run: |
+          echo "To publish to MCP registry, create a PR at:"
+          echo "https://github.com/modelcontextprotocol/registry"
+          echo "Add reference to: https://github.com/PipeOpsHQ/pipeops-mcp"
