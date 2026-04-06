@@ -50,7 +50,8 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				Name:        "get_project",
 				Description: "Get detailed information about a specific project",
 				InputSchema: objectSchema(map[string]interface{}{
-					"project_id": stringProperty("The project ID or UUID"),
+					"project_id":   stringProperty("The project ID, UUID, name, or slug"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
 				}, "project_id"),
 			},
 			handler: s.getProjectTool,
@@ -1201,6 +1202,11 @@ func textResult(text string) interface{} {
 	}
 }
 
+type getProjectArgs struct {
+	ProjectID   string `json:"project_id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
 type updateProjectArgs struct {
 	ProjectID    string `json:"project_id"`
 	Name         string `json:"name,omitempty"`
@@ -1859,6 +1865,85 @@ func projectIdentity(project map[string]interface{}) string {
 	return ""
 }
 
+func projectMatchesIdentifier(project map[string]interface{}, identifier string) bool {
+	for _, key := range []string{"UUID", "uuid", "ProjectUUID", "project_uuid", "ID", "id", "Name", "name", "NameSlug", "name_slug", "Slug", "slug", "ProjectSlug", "project_slug"} {
+		if extractString(lookupValue(project, key)) == identifier {
+			return true
+		}
+	}
+	for _, key := range []string{"Name", "name", "NameSlug", "name_slug", "Slug", "slug"} {
+		if strings.EqualFold(extractString(lookupValue(project, key)), identifier) {
+			return true
+		}
+	}
+	return false
+}
+
+func projectWorkspaceUUID(project map[string]interface{}, workspace workspaceReference) string {
+	for _, candidate := range []string{
+		extractString(lookupValue(project, "WorkspaceUUID", "workspace_uuid")),
+		workspace.UUID,
+		extractString(lookupValue(project, "WorkspaceID", "workspace_id")),
+	} {
+		if isUsableWorkspaceIdentifier(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func isLikelyDirectProjectIdentifier(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return false
+	}
+	if isLikelyUUID(trimmed) {
+		return true
+	}
+	for _, r := range trimmed {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) findProjectReference(ctx context.Context, projectID, workspaceID string) (workspaceReference, map[string]interface{}, error) {
+	var (
+		workspaces []workspaceReference
+		err        error
+	)
+	if workspaceID != "" {
+		workspace, resolveErr := s.resolveWorkspaceReference(ctx, workspaceID)
+		if resolveErr != nil {
+			return workspaceReference{}, nil, resolveErr
+		}
+		workspaces = []workspaceReference{workspace}
+	} else {
+		workspaces, _, _, err = s.listWorkspaceReferences(ctx)
+		if err != nil {
+			return workspaceReference{}, nil, err
+		}
+	}
+
+	for _, workspace := range workspaces {
+		projects, _, _, fetchErr := s.fetchProjectsForWorkspaceReference(ctx, workspace)
+		if fetchErr != nil {
+			if isWorkspaceProjectsFallbackError(fetchErr) {
+				continue
+			}
+			return workspaceReference{}, nil, fetchErr
+		}
+		for _, project := range projects {
+			if projectMatchesIdentifier(project, projectID) {
+				return workspace, normalizeProject(project), nil
+			}
+		}
+	}
+
+	return workspaceReference{}, nil, nil
+}
+
 func paginateProjects(projects []map[string]interface{}, page, limit int) []map[string]interface{} {
 	if limit <= 0 {
 		return projects
@@ -1980,16 +2065,81 @@ func isBillingWorkspaceRequiredError(err error) bool {
 }
 
 func (s *Server) getProjectTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	projectID, err := requiredString(args, "project_id")
-	if err != nil {
+	var req getProjectArgs
+	if err := decodeArguments(args, &req); err != nil {
 		return nil, err
+	}
+	if req.ProjectID == "" {
+		return nil, fmt.Errorf("project_id is required")
 	}
 
-	resp, _, err := s.client.Projects.Get(ctx, projectID)
+	workspaceUUID := ""
+	if req.WorkspaceID != "" {
+		workspace, err := s.resolveWorkspaceReference(ctx, req.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		workspaceUUID = projectWorkspaceUUID(nil, workspace)
+	}
+
+	var directErr error
+	if isLikelyDirectProjectIdentifier(req.ProjectID) {
+		var (
+			resp *pipeops.ProjectResponse
+			err  error
+		)
+		if workspaceUUID != "" {
+			resp, _, err = s.client.Projects.Get(ctx, req.ProjectID, &pipeops.ProjectGetOptions{WorkspaceUUID: workspaceUUID})
+		} else {
+			resp, _, err = s.client.Projects.Get(ctx, req.ProjectID)
+		}
+		if err == nil {
+			return jsonResult(resp)
+		}
+		if !isWorkspaceProjectsFallbackError(err) {
+			return nil, err
+		}
+		directErr = err
+	}
+
+	workspace, project, err := s.findProjectReference(ctx, req.ProjectID, req.WorkspaceID)
 	if err != nil {
 		return nil, err
 	}
-	return jsonResult(resp)
+	if project == nil {
+		if directErr != nil {
+			return nil, directErr
+		}
+		return nil, fmt.Errorf("project %q not found", req.ProjectID)
+	}
+
+	resolvedProjectID := projectIdentity(project)
+	resolvedWorkspaceUUID := projectWorkspaceUUID(project, workspace)
+	if resolvedProjectID != "" {
+		var (
+			resp *pipeops.ProjectResponse
+			err  error
+		)
+		if resolvedWorkspaceUUID != "" {
+			resp, _, err = s.client.Projects.Get(ctx, resolvedProjectID, &pipeops.ProjectGetOptions{WorkspaceUUID: resolvedWorkspaceUUID})
+		} else {
+			resp, _, err = s.client.Projects.Get(ctx, resolvedProjectID)
+		}
+		if err == nil {
+			return jsonResult(resp)
+		}
+		if !isWorkspaceProjectsFallbackError(err) {
+			return nil, err
+		}
+	}
+
+	return jsonResult(map[string]interface{}{
+		"status":  "success",
+		"message": "ok",
+		"data": map[string]interface{}{
+			"project": project,
+		},
+	})
 }
 
 func (s *Server) createProjectTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
