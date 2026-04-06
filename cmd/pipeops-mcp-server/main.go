@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,7 +13,7 @@ import (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		log.New(os.Stderr, "", 0).Printf("Error: %v", err)
 		os.Exit(1)
 	}
 }
