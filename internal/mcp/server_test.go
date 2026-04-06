@@ -242,6 +242,20 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		t.Error("Expected get_billing_info to expose workspace_id override")
 	}
 
+	listSubscriptions := toolByName["list_subscriptions"]
+	if _, ok := listSubscriptions.InputSchema["required"]; ok {
+		t.Error("Did not expect list_subscriptions to require arguments")
+	}
+
+	listSubscriptionsProperties, ok := listSubscriptions.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected list_subscriptions properties schema")
+	}
+
+	if _, ok := listSubscriptionsProperties["workspace_id"]; !ok {
+		t.Error("Expected list_subscriptions to expose workspace_id override")
+	}
+
 	createProject := toolByName["create_project"]
 	required, ok := createProject.InputSchema["required"].([]string)
 	if !ok {
@@ -1523,5 +1537,68 @@ func TestGetBillingInfoToolUsesExplicitWorkspaceOverride(t *testing.T) {
 	}
 	if requests["/billing/subscriptions/current"] != 1 {
 		t.Fatalf("billing/subscriptions/current requests = %d, want 1", requests["/billing/subscriptions/current"])
+	}
+}
+
+func TestListSubscriptionsToolNormalizesArrayResponse(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch r.URL.Path {
+			case "/billing/subscriptions":
+				if r.Method != http.MethodGet {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":[{"UID":"sub_1","PlanTier":"startup"},{"UID":"sub_2","PlanTier":"scale"}]}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listSubscriptionsTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listSubscriptionsTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	subscriptions, ok := data["subscriptions"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected subscriptions list, got %v", data["subscriptions"])
+	}
+	if len(subscriptions) != 2 {
+		t.Fatalf("subscriptions len = %d, want %d", len(subscriptions), 2)
+	}
+	if requests["/billing/subscriptions"] != 1 {
+		t.Fatalf("billing/subscriptions requests = %d, want 1", requests["/billing/subscriptions"])
 	}
 }

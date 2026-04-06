@@ -810,7 +810,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			tool: Tool{
 				Name:        "list_subscriptions",
 				Description: "List billing subscriptions",
-				InputSchema: emptySchema(),
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}),
 			},
 			handler: s.listSubscriptionsTool,
 		},
@@ -1149,6 +1151,26 @@ func (s *Server) requestBillingJSONWithWorkspaceFallback(ctx context.Context, me
 		*workspaceUUID = resolvedWorkspaceUUID
 	}
 	return s.requestJSON(ctx, method, withWorkspaceUUIDQuery(path, resolvedWorkspaceUUID), body)
+}
+
+func normalizeCollectionResponse(resp map[string]interface{}, key string) map[string]interface{} {
+	normalized := make(map[string]interface{}, len(resp))
+	for k, v := range resp {
+		normalized[k] = v
+	}
+
+	switch data := normalized["data"].(type) {
+	case nil:
+		normalized["data"] = map[string]interface{}{key: []interface{}{}}
+	case []interface{}:
+		normalized["data"] = map[string]interface{}{key: data}
+	case map[string]interface{}:
+		if _, ok := data[key]; !ok {
+			normalized["data"] = map[string]interface{}{key: []interface{}{data}}
+		}
+	}
+
+	return normalized
 }
 
 func responseData(resp map[string]interface{}) interface{} {
@@ -3163,12 +3185,12 @@ func (s *Server) getActiveCardTool(ctx context.Context, _ map[string]interface{}
 	return jsonResult(resp)
 }
 
-func (s *Server) listSubscriptionsTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.Billing.ListSubscriptions(ctx)
+func (s *Server) listSubscriptionsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	resp, err := s.requestBillingJSONWithWorkspaceFallback(ctx, http.MethodGet, "billing/subscriptions", args, nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	return jsonResult(resp)
+	return jsonResult(normalizeCollectionResponse(resp, "subscriptions"))
 }
 
 func (s *Server) getSubscriptionTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
