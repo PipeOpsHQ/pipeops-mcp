@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/PipeOpsHQ/pipeops-go-sdk/pipeops"
@@ -701,7 +702,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			tool: Tool{
 				Name:        "get_billing_info",
 				Description: "Get current billing balance and subscription information for the account",
-				InputSchema: emptySchema(),
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}),
 			},
 			handler: s.getBillingInfoTool,
 		},
@@ -1058,6 +1061,25 @@ func (s *Server) resolveDefaultWorkspaceID(ctx context.Context, args map[string]
 	return "", fmt.Errorf("workspace_id is required")
 }
 
+func (s *Server) resolveDefaultWorkspaceUUID(ctx context.Context, args map[string]interface{}) (string, error) {
+	workspaceID, err := s.resolveDefaultWorkspaceID(ctx, args)
+	if err != nil {
+		return "", err
+	}
+	if isLikelyUUID(workspaceID) {
+		return workspaceID, nil
+	}
+
+	workspace, err := s.resolveWorkspaceReference(ctx, workspaceID)
+	if err == nil && isLikelyUUID(workspace.UUID) {
+		return workspace.UUID, nil
+	}
+	if err == nil && isUsableWorkspaceIdentifier(workspace.UUID) {
+		return workspace.UUID, nil
+	}
+	return workspaceID, nil
+}
+
 func jsonResult(v interface{}) (interface{}, error) {
 	return map[string]interface{}{
 		"content": []interface{}{
@@ -1081,6 +1103,52 @@ func (s *Server) requestJSON(ctx context.Context, method, path string, body inte
 	}
 
 	return resp, nil
+}
+
+func withWorkspaceUUIDQuery(path, workspaceUUID string) string {
+	if strings.TrimSpace(workspaceUUID) == "" {
+		return path
+	}
+
+	parsed, err := url.Parse(path)
+	if err != nil {
+		return path
+	}
+	query := parsed.Query()
+	query.Set("workspace_uuid", workspaceUUID)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
+func (s *Server) requestBillingJSONWithWorkspaceFallback(ctx context.Context, method, path string, args map[string]interface{}, body interface{}, workspaceUUID *string) (map[string]interface{}, error) {
+	if workspaceUUID != nil && *workspaceUUID != "" {
+		return s.requestJSON(ctx, method, withWorkspaceUUIDQuery(path, *workspaceUUID), body)
+	}
+
+	if workspaceID, ok := args["workspace_id"].(string); ok && strings.TrimSpace(workspaceID) != "" {
+		resolvedWorkspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+		if err != nil {
+			return nil, err
+		}
+		if workspaceUUID != nil {
+			*workspaceUUID = resolvedWorkspaceUUID
+		}
+		return s.requestJSON(ctx, method, withWorkspaceUUIDQuery(path, resolvedWorkspaceUUID), body)
+	}
+
+	resp, err := s.requestJSON(ctx, method, path, body)
+	if err == nil || !isBillingWorkspaceRequiredError(err) {
+		return resp, err
+	}
+
+	resolvedWorkspaceUUID, resolveErr := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if resolveErr != nil {
+		return nil, resolveErr
+	}
+	if workspaceUUID != nil {
+		*workspaceUUID = resolvedWorkspaceUUID
+	}
+	return s.requestJSON(ctx, method, withWorkspaceUUIDQuery(path, resolvedWorkspaceUUID), body)
 }
 
 func responseData(resp map[string]interface{}) interface{} {
@@ -1842,6 +1910,11 @@ func isUsableWorkspaceIdentifier(value string) bool {
 	return true
 }
 
+func isLikelyUUID(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return len(trimmed) >= 32 && strings.Count(trimmed, "-") == 4
+}
+
 func responseStatus(status string) string {
 	if status != "" {
 		return status
@@ -1870,6 +1943,18 @@ func isWorkspaceProjectsFallbackError(err error) bool {
 	default:
 		return false
 	}
+}
+
+func isBillingWorkspaceRequiredError(err error) bool {
+	var apiErr *pipeops.ErrorResponse
+	if !errors.As(err, &apiErr) || apiErr.Response == nil {
+		return false
+	}
+	if apiErr.Response.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(apiErr.Message))
+	return strings.Contains(message, "workspace")
 }
 
 func (s *Server) getProjectTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -2929,8 +3014,9 @@ func (s *Server) getMyAddOnSubmissionsTool(ctx context.Context, _ map[string]int
 	return jsonResult(resp)
 }
 
-func (s *Server) getBillingInfoTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	balanceResp, err := s.requestJSON(ctx, http.MethodGet, "billing/balance", nil)
+func (s *Server) getBillingInfoTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	workspaceUUID := ""
+	balanceResp, err := s.requestBillingJSONWithWorkspaceFallback(ctx, http.MethodGet, "billing/balance", args, nil, &workspaceUUID)
 	if err != nil {
 		return nil, err
 	}
@@ -2943,7 +3029,7 @@ func (s *Server) getBillingInfoTool(ctx context.Context, _ map[string]interface{
 		},
 	}
 
-	currentSubscriptionResp, err := s.requestJSON(ctx, http.MethodGet, "billing/subscriptions/current", nil)
+	currentSubscriptionResp, err := s.requestBillingJSONWithWorkspaceFallback(ctx, http.MethodGet, "billing/subscriptions/current", args, nil, &workspaceUUID)
 	if err != nil {
 		if !isHTTPStatus(err, http.StatusNotFound) {
 			return nil, err

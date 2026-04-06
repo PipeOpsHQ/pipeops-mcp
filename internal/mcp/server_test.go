@@ -228,6 +228,20 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		t.Error("Expected list_environments to expose workspace_id filter")
 	}
 
+	getBillingInfo := toolByName["get_billing_info"]
+	if _, ok := getBillingInfo.InputSchema["required"]; ok {
+		t.Error("Did not expect get_billing_info to require arguments")
+	}
+
+	getBillingInfoProperties, ok := getBillingInfo.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected get_billing_info properties schema")
+	}
+
+	if _, ok := getBillingInfoProperties["workspace_id"]; !ok {
+		t.Error("Expected get_billing_info to expose workspace_id override")
+	}
+
 	createProject := toolByName["create_project"]
 	required, ok := createProject.InputSchema["required"].([]string)
 	if !ok {
@@ -1314,18 +1328,31 @@ func TestGetBillingInfoToolUsesSupportedControllerEndpoints(t *testing.T) {
 			requests[r.URL.Path]++
 
 			switch r.URL.Path {
+			case "/workspace":
+				if r.Method != http.MethodGet {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"uuid":"5877a4ae-a891-49de-909d-0221f5eefc95"}]}`), nil
 			case "/billing/balance":
 				if r.Method != http.MethodGet {
 					t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+				}
+				if got := r.URL.Query().Get("workspace_uuid"); got == "" {
+					return jsonHTTPResponse(r, http.StatusBadRequest, `{"message":"workspace required for billing access"}`), nil
+				} else if got != "5877a4ae-a891-49de-909d-0221f5eefc95" {
+					t.Fatalf("workspace_uuid = %q, want %q", got, "5877a4ae-a891-49de-909d-0221f5eefc95")
 				}
 				return jsonHTTPResponse(r, http.StatusOK, `{"data":{"Balance":"0.01","Currency":"USD"},"message":"ok","success":true}`), nil
 			case "/billing/subscriptions/current":
 				if r.Method != http.MethodGet {
 					t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
 				}
+				if got := r.URL.Query().Get("workspace_uuid"); got != "5877a4ae-a891-49de-909d-0221f5eefc95" {
+					t.Fatalf("workspace_uuid = %q, want %q", got, "5877a4ae-a891-49de-909d-0221f5eefc95")
+				}
 				return jsonHTTPResponse(r, http.StatusOK, `{"data":{"UID":"sub_123","PlanTier":"startup","PlanName":"Start-up","Amount":"34.99","BillingType":"trial","Status":"active"},"message":"ok","success":true}`), nil
 			default:
-				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 				return nil, nil
 			}
 		}),
@@ -1378,8 +1405,11 @@ func TestGetBillingInfoToolUsesSupportedControllerEndpoints(t *testing.T) {
 		t.Fatalf("PlanTier = %v, want %v", currentSubscription["PlanTier"], "startup")
 	}
 
-	if requests["/billing/balance"] != 1 {
-		t.Fatalf("billing/balance requests = %d, want 1", requests["/billing/balance"])
+	if requests["/workspace"] != 1 {
+		t.Fatalf("workspace requests = %d, want 1", requests["/workspace"])
+	}
+	if requests["/billing/balance"] != 2 {
+		t.Fatalf("billing/balance requests = %d, want 2", requests["/billing/balance"])
 	}
 	if requests["/billing/subscriptions/current"] != 1 {
 		t.Fatalf("billing/subscriptions/current requests = %d, want 1", requests["/billing/subscriptions/current"])
@@ -1389,19 +1419,29 @@ func TestGetBillingInfoToolUsesSupportedControllerEndpoints(t *testing.T) {
 func TestGetBillingInfoToolAllowsMissingCurrentSubscription(t *testing.T) {
 	t.Parallel()
 
+	requests := map[string]int{}
 	client, err := pipeops.NewClient("https://api.pipeops.test")
 	if err != nil {
 		t.Fatalf("NewClient error: %v", err)
 	}
 	client.SetHTTPClient(&http.Client{
 		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
 			switch r.URL.Path {
+			case "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"uuid":"5877a4ae-a891-49de-909d-0221f5eefc95"}]}`), nil
 			case "/billing/balance":
+				if got := r.URL.Query().Get("workspace_uuid"); got == "" {
+					return jsonHTTPResponse(r, http.StatusBadRequest, `{"message":"workspace required for billing access"}`), nil
+				}
 				return jsonHTTPResponse(r, http.StatusOK, `{"data":{"Balance":"10.00","Currency":"USD"},"message":"ok","success":true}`), nil
 			case "/billing/subscriptions/current":
+				if got := r.URL.Query().Get("workspace_uuid"); got != "5877a4ae-a891-49de-909d-0221f5eefc95" {
+					t.Fatalf("workspace_uuid = %q, want %q", got, "5877a4ae-a891-49de-909d-0221f5eefc95")
+				}
 				return jsonHTTPResponse(r, http.StatusNotFound, `{"message":"not found"}`), nil
 			default:
-				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 				return nil, nil
 			}
 		}),
@@ -1428,5 +1468,60 @@ func TestGetBillingInfoToolAllowsMissingCurrentSubscription(t *testing.T) {
 	}
 	if data["current_subscription"] != nil {
 		t.Fatalf("Expected nil current_subscription, got %v", data["current_subscription"])
+	}
+	if requests["/workspace"] != 1 {
+		t.Fatalf("workspace requests = %d, want 1", requests["/workspace"])
+	}
+}
+
+func TestGetBillingInfoToolUsesExplicitWorkspaceOverride(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceUUID := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch r.URL.Path {
+			case "/workspace":
+				t.Fatalf("unexpected workspace lookup")
+				return nil, nil
+			case "/billing/balance":
+				if got := r.URL.Query().Get("workspace_uuid"); got != workspaceUUID {
+					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":{"Balance":"12.50","Currency":"USD"},"message":"ok","success":true}`), nil
+			case "/billing/subscriptions/current":
+				if got := r.URL.Query().Get("workspace_uuid"); got != workspaceUUID {
+					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":{"UID":"sub_explicit"},"message":"ok","success":true}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getBillingInfoTool(context.Background(), map[string]interface{}{"workspace_id": workspaceUUID})
+	if err != nil {
+		t.Fatalf("getBillingInfoTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if requests["/workspace"] != 0 {
+		t.Fatalf("workspace requests = %d, want 0", requests["/workspace"])
+	}
+	if requests["/billing/balance"] != 1 {
+		t.Fatalf("billing/balance requests = %d, want 1", requests["/billing/balance"])
+	}
+	if requests["/billing/subscriptions/current"] != 1 {
+		t.Fatalf("billing/subscriptions/current requests = %d, want 1", requests["/billing/subscriptions/current"])
 	}
 }
