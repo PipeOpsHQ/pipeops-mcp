@@ -906,6 +906,86 @@ func TestDeployAddOnToolFallsBackToFirstWorkspace(t *testing.T) {
 	}
 }
 
+func TestListProjectsToolAggregatesAcrossWorkspacesWithoutWorkspaceFetchFallback(t *testing.T) {
+	t.Parallel()
+
+	workspaceFetchCalls := 0
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"workspaces":[{"id":"1","uuid":"w1"},{"id":"2","uuid":"w2"}]}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w1":
+				workspaceFetchCalls++
+				t.Fatalf("unexpected workspace fallback request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w2":
+				workspaceFetchCalls++
+				t.Fatalf("unexpected workspace fallback request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/fetch":
+				if got := r.URL.Query().Get("limit"); got != "1000" {
+					t.Fatalf("limit = %q, want %q", got, "1000")
+				}
+				switch got := r.URL.Query().Get("workspace_uuid"); got {
+				case "w1":
+					return jsonHTTPResponse(r, http.StatusOK, `{"data":{"projects":[{"UUID":"p1","Name":"proj-1","ID":1487}]},"message":"ok","success":true}`), nil
+				case "w2":
+					return jsonHTTPResponse(r, http.StatusOK, `{"data":{"projects":[{"UUID":"p1","Name":"proj-1","ID":1487},{"UUID":"p2","Name":"proj-2","ID":1488}]},"message":"ok","success":true}`), nil
+				default:
+					t.Fatalf("workspace_uuid = %q, want one of %q or %q", got, "w1", "w2")
+					return nil, nil
+				}
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listProjectsTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listProjectsTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	projects, ok := data["projects"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected projects list, got %v", data["projects"])
+	}
+	if len(projects) != 2 {
+		t.Fatalf("projects len = %d, want %d", len(projects), 2)
+	}
+	if workspaceFetchCalls != 0 {
+		t.Fatalf("workspace fetch calls = %d, want 0", workspaceFetchCalls)
+	}
+}
+
 func TestGetBillingInfoToolUsesSupportedControllerEndpoints(t *testing.T) {
 	t.Parallel()
 

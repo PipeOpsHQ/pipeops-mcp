@@ -1307,11 +1307,104 @@ func (s *Server) listProjectsTool(ctx context.Context, args map[string]interface
 		opts = decoded
 	}
 
-	resp, _, err := s.client.Projects.List(ctx, opts)
+	if opts != nil && (opts.WorkspaceID != "" || opts.WorkspaceUUID != "") {
+		resp, _, err := s.client.Projects.List(ctx, opts)
+		if err != nil {
+			return nil, err
+		}
+		return jsonResult(resp)
+	}
+
+	resp, err := s.listProjectsAcrossWorkspaces(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 	return jsonResult(resp)
+}
+
+func (s *Server) listProjectsAcrossWorkspaces(ctx context.Context, opts *pipeops.ProjectListOptions) (*pipeops.ProjectsResponse, error) {
+	workspacesResp, _, err := s.client.Workspaces.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	projectsResp := &pipeops.ProjectsResponse{
+		Status:  workspacesResp.Status,
+		Message: workspacesResp.Message,
+	}
+	seen := make(map[string]struct{})
+
+	for _, workspace := range workspacesResp.Data.Workspaces {
+		workspaceID := workspace.UUID
+		if workspaceID == "" {
+			workspaceID = workspace.ID
+		}
+		if workspaceID == "" {
+			continue
+		}
+
+		wsOpts := &pipeops.ProjectListOptions{
+			WorkspaceUUID: workspaceID,
+			WorkspaceID:   workspaceID,
+			Limit:         1000,
+		}
+		if opts != nil {
+			wsOpts.ServerID = opts.ServerID
+		}
+
+		workspaceProjects, _, workspaceErr := s.client.Projects.List(ctx, wsOpts)
+		if workspaceErr != nil {
+			return nil, workspaceErr
+		}
+		if projectsResp.Status == "" {
+			projectsResp.Status = workspaceProjects.Status
+		}
+		if projectsResp.Message == "" {
+			projectsResp.Message = workspaceProjects.Message
+		}
+
+		for _, project := range workspaceProjects.Data.Projects {
+			projectKey := project.UUID
+			if projectKey == "" {
+				projectKey = project.ID.String()
+			}
+			if projectKey == "" {
+				continue
+			}
+			if _, ok := seen[projectKey]; ok {
+				continue
+			}
+			seen[projectKey] = struct{}{}
+			projectsResp.Data.Projects = append(projectsResp.Data.Projects, project)
+		}
+	}
+
+	if opts != nil {
+		projectsResp.Data.Projects = paginateProjects(projectsResp.Data.Projects, opts.Page, opts.Limit)
+	}
+
+	return projectsResp, nil
+}
+
+func paginateProjects(projects []pipeops.Project, page, limit int) []pipeops.Project {
+	if limit <= 0 {
+		return projects
+	}
+	if page <= 0 {
+		page = 1
+	}
+
+	start := (page - 1) * limit
+	if start >= len(projects) {
+		return []pipeops.Project{}
+	}
+
+	end := start + limit
+	if end > len(projects) {
+		end = len(projects)
+	}
+
+	return projects[start:end]
 }
 
 func (s *Server) getProjectTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
