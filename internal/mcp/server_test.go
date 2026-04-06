@@ -1140,6 +1140,182 @@ func TestListProjectsToolExplicitWorkspaceFallsBackToWorkspaceID(t *testing.T) {
 	}
 }
 
+func TestListServersToolAggregatesAcrossWorkspacesUsingWorkspaceFetchFallback(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"w1"},{"ID":2,"UUID":"w2"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w1":
+				return jsonHTTPResponse(r, http.StatusNotFound, `{"message":"workspace with uuid not found"}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/1":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"w1","Clusters":[{"Cluster":{"uuid":"srv1","name":"alpha","cloudProvider":"aws","region":"us-east-1"},"IsActive":true}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w2":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"w2","Clusters":[{"uuid":"srv2","name":"beta","cloudProvider":"gcp","region":"europe-west1","status":"provisioning"}]}}}`), nil
+			case strings.HasPrefix(r.URL.Path, "/cluster"):
+				t.Fatalf("unexpected legacy cluster route: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listServersTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listServersTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	servers, ok := data["servers"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected servers list, got %v", data["servers"])
+	}
+	if len(servers) != 2 {
+		t.Fatalf("servers len = %d, want %d", len(servers), 2)
+	}
+
+	serverByUUID := make(map[string]map[string]interface{}, len(servers))
+	for _, item := range servers {
+		serverMap, ok := item.(map[string]interface{})
+		if !ok {
+			t.Fatalf("Expected server map, got %T", item)
+		}
+		serverByUUID[serverMap["uuid"].(string)] = serverMap
+	}
+	if got := serverByUUID["srv1"]["workspace_id"]; got != "w1" {
+		t.Fatalf("srv1 workspace_id = %v, want %q", got, "w1")
+	}
+	if got := serverByUUID["srv1"]["status"]; got != "active" {
+		t.Fatalf("srv1 status = %v, want %q", got, "active")
+	}
+	if got := serverByUUID["srv2"]["workspace_id"]; got != "w2" {
+		t.Fatalf("srv2 workspace_id = %v, want %q", got, "w2")
+	}
+	if got := serverByUUID["srv2"]["status"]; got != "provisioning" {
+		t.Fatalf("srv2 status = %v, want %q", got, "provisioning")
+	}
+	if requests["/workspace"] != 1 {
+		t.Fatalf("workspace calls = %d, want 1", requests["/workspace"])
+	}
+	if requests["/workspace/fetch/w1"] != 1 {
+		t.Fatalf("workspace/fetch/w1 calls = %d, want 1", requests["/workspace/fetch/w1"])
+	}
+	if requests["/workspace/fetch/1"] != 1 {
+		t.Fatalf("workspace/fetch/1 calls = %d, want 1", requests["/workspace/fetch/1"])
+	}
+	if requests["/workspace/fetch/w2"] != 1 {
+		t.Fatalf("workspace/fetch/w2 calls = %d, want 1", requests["/workspace/fetch/w2"])
+	}
+}
+
+func TestListServersToolExplicitWorkspaceUsesWorkspaceFetchFallback(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"workspaces":[{"id":"1","uuid":"w1"}]}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w1":
+				return jsonHTTPResponse(r, http.StatusNotFound, `{"message":"workspace with uuid not found"}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/1":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"w1","Clusters":[{"uuid":"srv1","name":"alpha","cloudProvider":"aws","region":"us-east-1","status":"running"}]}}}`), nil
+			case strings.HasPrefix(r.URL.Path, "/cluster"):
+				t.Fatalf("unexpected legacy cluster route: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listServersTool(context.Background(), map[string]interface{}{"workspace_id": "w1"})
+	if err != nil {
+		t.Fatalf("listServersTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	servers, ok := data["servers"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected servers list, got %v", data["servers"])
+	}
+	if len(servers) != 1 {
+		t.Fatalf("servers len = %d, want %d", len(servers), 1)
+	}
+	serverMap, ok := servers[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected server map, got %T", servers[0])
+	}
+	if got := serverMap["workspace_id"]; got != "w1" {
+		t.Fatalf("workspace_id = %v, want %q", got, "w1")
+	}
+	if requests["/workspace/fetch/w1"] != 1 {
+		t.Fatalf("workspace/fetch/w1 calls = %d, want 1", requests["/workspace/fetch/w1"])
+	}
+	if requests["/workspace/fetch/1"] != 1 {
+		t.Fatalf("workspace/fetch/1 calls = %d, want 1", requests["/workspace/fetch/1"])
+	}
+}
+
 func TestGetProjectToolFallsBackToWorkspaceLookupForProjectName(t *testing.T) {
 	t.Parallel()
 

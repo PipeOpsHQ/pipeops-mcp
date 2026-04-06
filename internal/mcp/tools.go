@@ -1988,6 +1988,57 @@ func normalizeCluster(cluster map[string]interface{}, workspace map[string]inter
 	return normalized
 }
 
+func normalizeServer(cluster map[string]interface{}, workspace workspaceReference) map[string]interface{} {
+	workspacePayload := map[string]interface{}{}
+	if workspace.UUID != "" {
+		workspacePayload["UUID"] = workspace.UUID
+	}
+	if workspace.ID != "" {
+		workspacePayload["ID"] = workspace.ID
+	}
+
+	normalizedCluster := normalizeCluster(cluster, workspacePayload)
+	status := extractString(lookupValue(normalizedCluster, "Status", "status"))
+	if status == "" {
+		switch strings.ToLower(extractString(lookupValue(normalizedCluster, "IsActive", "is_active"))) {
+		case "true":
+			status = "active"
+		case "false":
+			status = "inactive"
+		}
+	}
+
+	server := map[string]interface{}{}
+	if id := extractString(lookupValue(normalizedCluster, "ID", "id")); id != "" {
+		server["id"] = id
+	}
+	if uuid := clusterIdentity(normalizedCluster); uuid != "" {
+		server["uuid"] = uuid
+	}
+	if name := extractString(lookupValue(normalizedCluster, "Name", "name")); name != "" {
+		server["name"] = name
+	}
+	if provider := extractString(lookupValue(normalizedCluster, "CloudProvider", "cloudProvider", "cloud_provider", "Provider", "provider")); provider != "" {
+		server["provider"] = provider
+	}
+	if region := extractString(lookupValue(normalizedCluster, "Region", "region")); region != "" {
+		server["region"] = region
+	}
+	if status != "" {
+		server["status"] = status
+	}
+	if workspaceUUID := clusterWorkspaceUUID(normalizedCluster, workspace); workspaceUUID != "" {
+		server["workspace_id"] = workspaceUUID
+	}
+	if createdAt := lookupValue(normalizedCluster, "CreatedAt", "created_at"); createdAt != nil {
+		server["created_at"] = createdAt
+	}
+	if updatedAt := lookupValue(normalizedCluster, "UpdatedAt", "updated_at"); updatedAt != nil {
+		server["updated_at"] = updatedAt
+	}
+	return server
+}
+
 func clusterIdentity(cluster map[string]interface{}) string {
 	for _, key := range []string{"UUID", "uuid", "ClusterUUID", "cluster_uuid", "ID", "id"} {
 		if value := extractString(lookupValue(cluster, key)); value != "" {
@@ -2708,16 +2759,98 @@ func (s *Server) listPublicRegistryTagsTool(ctx context.Context, args map[string
 }
 
 func (s *Server) listServersTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	workspaceID, err := s.resolveWorkspaceID(ctx, args)
-	if err != nil {
-		return nil, err
-	}
+	workspaceID, _ := args["workspace_id"].(string)
 
-	resp, _, err := s.client.Servers.List(ctx, workspaceID)
+	var (
+		resp map[string]interface{}
+		err  error
+	)
+	if strings.TrimSpace(workspaceID) != "" {
+		resp, err = s.listServersForWorkspace(ctx, workspaceID)
+	} else {
+		resp, err = s.listServersAcrossWorkspaces(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return jsonResult(resp)
+}
+
+func (s *Server) listServersAcrossWorkspaces(ctx context.Context) (map[string]interface{}, error) {
+	workspaces, status, message, err := s.listWorkspaceReferences(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	servers := make([]map[string]interface{}, 0)
+	seen := make(map[string]struct{})
+	for _, workspace := range workspaces {
+		workspaceClusters, workspaceStatus, workspaceMessage, workspaceErr := s.fetchClustersForWorkspaceReference(ctx, workspace)
+		if workspaceErr != nil {
+			if isWorkspaceProjectsFallbackError(workspaceErr) {
+				continue
+			}
+			return nil, workspaceErr
+		}
+		if status == "" {
+			status = workspaceStatus
+		}
+		if message == "" {
+			message = workspaceMessage
+		}
+		for _, cluster := range workspaceClusters {
+			clusterKey := clusterIdentity(cluster)
+			if clusterKey != "" {
+				if _, ok := seen[clusterKey]; ok {
+					continue
+				}
+				seen[clusterKey] = struct{}{}
+			}
+			servers = append(servers, normalizeServer(cluster, workspace))
+		}
+	}
+
+	return map[string]interface{}{
+		"status":  responseStatus(status),
+		"message": message,
+		"data": map[string]interface{}{
+			"servers": servers,
+		},
+	}, nil
+}
+
+func (s *Server) listServersForWorkspace(ctx context.Context, workspaceID string) (map[string]interface{}, error) {
+	workspaceRef, err := s.resolveWorkspaceReference(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	clusters, status, message, err := s.fetchClustersForWorkspaceReference(ctx, workspaceRef)
+	if err != nil {
+		if isWorkspaceProjectsFallbackError(err) {
+			return map[string]interface{}{
+				"status":  "success",
+				"message": err.Error(),
+				"data": map[string]interface{}{
+					"servers": []map[string]interface{}{},
+				},
+			}, nil
+		}
+		return nil, err
+	}
+
+	servers := make([]map[string]interface{}, 0, len(clusters))
+	for _, cluster := range clusters {
+		servers = append(servers, normalizeServer(cluster, workspaceRef))
+	}
+
+	return map[string]interface{}{
+		"status":  responseStatus(status),
+		"message": message,
+		"data": map[string]interface{}{
+			"servers": servers,
+		},
+	}, nil
 }
 
 func (s *Server) getServerTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
