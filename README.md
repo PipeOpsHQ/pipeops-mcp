@@ -67,35 +67,97 @@ pipeops-mcp-server
 - `update_project` - Update project configuration
 - `delete_project` - Delete a project
 - `deploy_project` - Trigger project deployment
+- `restart_project` - Restart a project
+- `stop_project` - Stop a project
+- `get_project_logs` - Retrieve project logs
+- `get_project_env_variables` - Retrieve project environment variables
+- `update_project_env_variables` - Update project environment variables
+- `deploy_project_from_image` - Create and deploy a project from a pre-built container image
+
+### BYOI & Registries
+- `create_external_registry` - Create an external container registry configuration
+- `list_external_registries` - List external registries for a workspace
+- `get_external_registry` - Get external registry details
+- `delete_external_registry` - Delete an external registry configuration
+- `list_external_registry_images` - List repositories available through an external registry
+- `list_external_registry_tags` - List image tags available through an external registry
+- `search_public_registry_images` - Search public Docker Hub images
+- `list_public_registry_tags` - List tags for a public Docker Hub image
 
 ### Servers
 - `list_servers` - List all servers
 - `get_server` - Get server details
-- `create_server` - Provision a new server
-- `update_server` - Update server configuration
-- `delete_server` - Delete a server
-- `restart_server` - Restart a server
+- `get_cluster_connection` - Get cluster connection information (`server_id` also works as an alias)
+- `get_cluster_cost_allocation` - Get cluster compute cost allocation (`server_id` also works as an alias)
+
+### Cloud Providers
+- `list_cloud_provider_regions` - List available regions for a cloud provider
+- `list_cloud_provider_instance_categories` - List available instance categories for a cloud provider
+- `list_cloud_provider_instance_types` - List available instance types for a region and instance class
+- `list_cloud_provider_server_templates` - List recommended server templates for a cloud provider
 
 ### Environments
 - `list_environments` - List environment configurations
 - `get_environment` - Get environment details
-- `create_environment` - Create new environment
-- `update_environment` - Update environment variables
-- `delete_environment` - Delete environment
+- `create_environment` - Create a new environment
+- `update_environment` - Update environment metadata
+- `delete_environment` - Delete an environment
+- `set_environment_variables` - Set environment variables for an environment
 
 ### Teams & Workspaces
 - `list_teams` - List teams
+- `create_team` - Create a team
+- `update_team` - Update a team
 - `get_team` - Get team details
+- `invite_team_member` - Invite a team member
+- `list_team_members` - List members of a team
+- `remove_team_member` - Remove a team member
+- `update_team_member_role` - Update a team member role
 - `list_workspaces` - List workspaces
+- `create_workspace` - Create a workspace
+- `update_workspace` - Update a workspace
 - `get_workspace` - Get workspace details
+- `delete_workspace` - Delete a workspace
+- `set_workspace_billing_email` - Set workspace billing email
 
 ### Billing
 - `get_billing_info` - Get billing information
-- `get_usage` - Get resource usage statistics
+- `list_billing_plans` - List available billing plans
+- `subscribe_to_plan` - Subscribe to a billing plan
+- `cancel_subscription` - Cancel a subscription
+- `add_billing_card` - Add a billing card
+- `delete_billing_card` - Delete a billing card
+- `create_workspace_checkout` - Create workspace billing or checkout configuration
+- `start_trial` - Start a billing trial
+- `get_billing_portal_url` - Get the billing portal URL
+- `get_balance` - Get current account balance
+- `list_workspace_cards` - List current workspace billing cards
+- `get_active_card` - Get the active billing card
+- `list_subscriptions` - List subscriptions
+- `get_subscription` - Get subscription details
+- `list_invoices` - List invoices
+
+### Security
+- `list_service_account_tokens` - List service account tokens
+- `get_service_account_token` - Get service account token details
+- `create_service_account_token` - Create a service account token
+- `update_service_account_token` - Update a service account token
+- `revoke_service_account_token` - Revoke a service account token
 
 ### Users
 - `get_current_user` - Get current user profile
-- `update_user_profile` - Update user profile
+
+### Add-ons
+- `list_addons` - List available add-ons
+- `get_addon` - Get add-on details
+- `deploy_addon` - Deploy an add-on to a project or server
+- `list_addon_deployments` - List add-on deployments
+- `get_addon_deployment` - Get add-on deployment details
+- `get_addon_deployment_session` - Get add-on deployment session details
+- `view_addon_deployment_configs` - View add-on deployment config
+- `add_addon_domain` - Add a domain to an add-on
+- `list_addon_categories` - List add-on categories
+- `get_my_addon_submissions` - List your add-on submissions
 
 ## Examples
 
@@ -117,18 +179,68 @@ pipeops-mcp-server
 }
 ```
 
-### Create Environment Variable
+### Update Project Environment Variables
 ```json
 {
-  "name": "update_environment",
-  "arguments": {
-    "project_id": "proj_abc123",
-    "environment": "production",
-    "variables": {
-      "DATABASE_URL": "postgres://...",
-      "API_KEY": "secret123"
-    }
-  }
+	"name": "update_project_env_variables",
+	"arguments": {
+		"project_id": "proj_abc123",
+		"env_variables": [
+			{
+				"key": "DATABASE_URL",
+				"value": "postgres://..."
+			},
+			{
+				"key": "API_KEY",
+				"value": "secret123"
+			}
+		]
+	}
+}
+```
+
+### Deploy From an Image
+```json
+{
+	"name": "deploy_project_from_image",
+	"arguments": {
+		"name": "nginx-demo",
+		"container_image": "docker.io/library/nginx",
+		"image_tag": "latest",
+		"port": 80,
+		"vcpu": 0.5,
+		"memory": {
+			"value": 512,
+			"unit": "MB"
+		},
+		"server_id": "cluster_abc123",
+		"environment_id": "env_abc123",
+		"workspace_id": "ws_abc123"
+	}
+}
+```
+
+### Deploy an Add-on
+```json
+{
+	"name": "deploy_addon",
+	"arguments": {
+		"addon_id": "addon_abc123",
+		"project_id": "proj_abc123",
+		"config": {
+			"plan": "starter"
+		}
+	}
+}
+```
+
+### Start a Trial
+```json
+{
+	"name": "start_trial",
+	"arguments": {
+		"plan_id": "growth_v1"
+	}
 }
 ```
 
