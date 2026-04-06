@@ -3,13 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*.*.*"
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "Tag to release (without refs/tags/)"
-        required: true
-        type: string
+      - 'v*'
 
 permissions:
   contents: write
@@ -18,48 +12,57 @@ jobs:
   release:
     name: Release
     runs-on: ubuntu-latest
-    env:
-      RELEASE_REF: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', github.event.inputs.tag) || github.ref }}
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ env.RELEASE_REF }}
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@v5
         with:
-          go-version: "1.23.3"
-
-      - name: Cache Go modules
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
-          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            ${{ runner.os }}-go-
-
-      - name: Download dependencies
-        run: go mod download
+          go-version: '1.23.3'
 
       - name: Run tests
         run: go test -v ./...
 
-      - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v6
-        with:
-          distribution: goreleaser
-          version: latest
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build for multiple platforms
+        run: |
+          mkdir -p dist
+          
+          # Linux AMD64
+          GOOS=linux GOARCH=amd64 go build -o dist/pipeops-mcp-server-linux-amd64 ./cmd/pipeops-mcp-server
+          
+          # Linux ARM64
+          GOOS=linux GOARCH=arm64 go build -o dist/pipeops-mcp-server-linux-arm64 ./cmd/pipeops-mcp-server
+          
+          # macOS AMD64
+          GOOS=darwin GOARCH=amd64 go build -o dist/pipeops-mcp-server-darwin-amd64 ./cmd/pipeops-mcp-server
+          
+          # macOS ARM64
+          GOOS=darwin GOARCH=arm64 go build -o dist/pipeops-mcp-server-darwin-arm64 ./cmd/pipeops-mcp-server
+          
+          # Windows AMD64
+          GOOS=windows GOARCH=amd64 go build -o dist/pipeops-mcp-server-windows-amd64.exe ./cmd/pipeops-mcp-server
 
-      - name: Upload release artifacts
-        uses: actions/upload-artifact@v6
+      - name: Create checksums
+        run: |
+          cd dist
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
         with:
-          name: release-artifacts
-          path: dist/*
+          files: |
+            dist/pipeops-mcp-server-*
+            dist/checksums.txt
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+
+      - name: Submit to MCP Registry
+        run: |
+          echo "To publish to MCP registry, create a PR at:"
+          echo "https://github.com/modelcontextprotocol/registry"
+          echo "Add reference to: https://github.com/PipeOpsHQ/pipeops-mcp"
