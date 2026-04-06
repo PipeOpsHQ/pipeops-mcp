@@ -981,6 +981,58 @@ func TestListProjectsToolAggregatesAcrossWorkspacesUsingWorkspaceFetchIDFallback
 	}
 }
 
+func TestListProjectsToolSkipsZeroWorkspaceIDFallback(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":0,"UUID":"w1"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w1":
+				return jsonHTTPResponse(r, http.StatusNotFound, `{"message":"workspace with uuid not found"}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/0":
+				t.Fatalf("unexpected zero workspace id fallback request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listProjectsTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listProjectsTool error: %v", err)
+	}
+	resultMap := result.(map[string]interface{})
+	content := resultMap["content"].([]interface{})
+	textContent := content[0].(map[string]interface{})["text"].(string)
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data := payload["data"].(map[string]interface{})
+	projects := data["projects"].([]interface{})
+	if len(projects) != 0 {
+		t.Fatalf("projects len = %d, want %d", len(projects), 0)
+	}
+	if requests["/workspace/fetch/w1"] != 1 {
+		t.Fatalf("workspace/fetch/w1 calls = %d, want 1", requests["/workspace/fetch/w1"])
+	}
+	if requests["/workspace/fetch/0"] != 0 {
+		t.Fatalf("workspace/fetch/0 calls = %d, want 0", requests["/workspace/fetch/0"])
+	}
+}
+
 func TestListProjectsToolExplicitWorkspaceFallsBackToWorkspaceID(t *testing.T) {
 	t.Parallel()
 

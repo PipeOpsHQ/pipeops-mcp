@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/PipeOpsHQ/pipeops-go-sdk/pipeops"
 )
@@ -1298,8 +1299,9 @@ type cloudProviderInstanceTypesArgs struct {
 }
 
 type workspaceReference struct {
-	ID   string
-	UUID string
+	ID       string
+	UUID     string
+	Projects []map[string]interface{}
 }
 
 func (s *Server) listProjectsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -1342,6 +1344,9 @@ func (s *Server) listProjectsAcrossWorkspaces(ctx context.Context, opts *pipeops
 	for _, workspace := range workspaces {
 		workspaceProjects, workspaceStatus, workspaceMessage, workspaceErr := s.fetchProjectsForWorkspaceReference(ctx, workspace)
 		if workspaceErr != nil {
+			if isWorkspaceProjectsFallbackError(workspaceErr) {
+				continue
+			}
 			return nil, workspaceErr
 		}
 		if status == "" {
@@ -1387,6 +1392,15 @@ func (s *Server) listProjectsForWorkspace(ctx context.Context, workspaceID strin
 
 	projects, status, message, err := s.fetchProjectsForWorkspaceReference(ctx, workspaceRef)
 	if err != nil {
+		if isWorkspaceProjectsFallbackError(err) {
+			return map[string]interface{}{
+				"status":  "success",
+				"message": err.Error(),
+				"data": map[string]interface{}{
+					"projects": []map[string]interface{}{},
+				},
+			}, nil
+		}
 		return nil, err
 	}
 	filtered := make([]map[string]interface{}, 0, len(projects))
@@ -1424,6 +1438,10 @@ func (s *Server) resolveWorkspaceReference(ctx context.Context, workspaceID stri
 }
 
 func (s *Server) fetchProjectsForWorkspaceReference(ctx context.Context, workspace workspaceReference) ([]map[string]interface{}, string, string, error) {
+	if len(workspace.Projects) > 0 {
+		return workspace.Projects, "success", "ok", nil
+	}
+
 	identifiers := workspaceReferenceIdentifiers(workspace)
 	var lastErr error
 	for _, identifier := range identifiers {
@@ -1478,8 +1496,9 @@ func parseWorkspaceReferences(data json.RawMessage) ([]workspaceReference, error
 	workspaces := make([]workspaceReference, 0, len(items))
 	for _, item := range items {
 		workspace := workspaceReference{
-			ID:   extractString(lookupValue(item, "id", "ID")),
-			UUID: extractString(lookupValue(item, "uuid", "UUID")),
+			ID:       extractString(lookupValue(item, "id", "ID")),
+			UUID:     extractString(lookupValue(item, "uuid", "UUID", "uid", "UID")),
+			Projects: mapSliceValue(item, "projects", "Projects"),
 		}
 		if workspace.ID == "" && workspace.UUID == "" {
 			continue
@@ -1541,7 +1560,9 @@ func workspaceReferenceIdentifiers(workspace workspaceReference) []string {
 		identifiers = append(identifiers, value)
 	}
 	appendIdentifier(workspace.UUID)
-	appendIdentifier(workspace.ID)
+	if isUsableWorkspaceIdentifier(workspace.ID) {
+		appendIdentifier(workspace.ID)
+	}
 	return identifiers
 }
 
@@ -1652,6 +1673,14 @@ func extractString(value interface{}) string {
 	default:
 		return fmt.Sprintf("%v", typed)
 	}
+}
+
+func isUsableWorkspaceIdentifier(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "0" || trimmed == "0.0" || trimmed == "<nil>" {
+		return false
+	}
+	return true
 }
 
 func responseStatus(status string) string {
