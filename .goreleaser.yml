@@ -1,0 +1,99 @@
+version: 2
+
+project_name: pipeops-mcp-server
+
+before:
+  hooks:
+    - go test ./...
+
+builds:
+  - id: pipeops-mcp-server
+    main: ./cmd/pipeops-mcp-server
+    binary: pipeops-mcp-server
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+
+archives:
+  - id: default
+    ids:
+      - pipeops-mcp-server
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{- if eq .Os "darwin" }}macOS{{- else if eq .Os "windows" }}Windows{{- else }}Linux{{- end }}_{{ .Arch }}
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: Performance Improvements
+      regexp: '^.*?perf(\([[:word:]]+\))??!?:.+$'
+      order: 2
+    - title: Refactors
+      regexp: '^.*?refactor(\([[:word:]]+\))??!?:.+$'
+      order: 3
+    - title: Documentation
+      regexp: '^.*?docs(\([[:word:]]+\))??!?:.+$'
+      order: 4
+    - title: Other
+      order: 999
+
+release:
+  github:
+    owner: PipeOpsHQ
+    name: pipeops-mcp
+  name_template: Release {{ .Tag }}
+  draft: false
+  prerelease: auto
+  footer: |
+    ## Installation
+
+    Download the archive for your platform from the assets above and run `pipeops-mcp-server`.
+
+    ## MCP Usage
+
+    Set `PIPEOPS_TOKEN` before launching the server.
+
+    {{- if .PreviousTag }}
+    **Full Changelog**: https://github.com/PipeOpsHQ/pipeops-mcp/compare/{{ .PreviousTag }}...{{ .Tag }}
+    {{- end }}
+
+snapshot:
+  version_template: '{{ incpatch .Version }}-next'
+
+source:
+  enabled: true
+  name_template: '{{ .ProjectName }}-{{ .Version }}'
+  format: tar.gz
