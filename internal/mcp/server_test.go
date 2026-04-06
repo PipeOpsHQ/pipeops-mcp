@@ -468,6 +468,12 @@ func TestHandleToolsListSchemas(t *testing.T) {
 	if _, ok := getClusterCostAllocationProperties["workspace_id"]; !ok {
 		t.Error("Expected get_cluster_cost_allocation to expose workspace_id override")
 	}
+	if _, ok := getClusterCostAllocationProperties["aggregate"]; !ok {
+		t.Error("Expected get_cluster_cost_allocation to expose aggregate option")
+	}
+	if _, ok := getClusterCostAllocationProperties["window"]; !ok {
+		t.Error("Expected get_cluster_cost_allocation to expose window option")
+	}
 
 	deployProjectFromImage := toolByName["deploy_project_from_image"]
 	deployProjectFromImageRequired, ok := deployProjectFromImage.InputSchema["required"].([]string)
@@ -1652,6 +1658,12 @@ func TestGetClusterCostAllocationToolResolvesWorkspaceAcrossWorkspaces(t *testin
 				if got := r.URL.Query().Get("workspace_uuid"); got != workspaceTwo {
 					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceTwo)
 				}
+				if got := r.URL.Query().Get("aggregate"); got != "namespace" {
+					t.Fatalf("aggregate = %q, want %q", got, "namespace")
+				}
+				if got := r.URL.Query().Get("window"); got != "30d" {
+					t.Fatalf("window = %q, want %q", got, "30d")
+				}
 				return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","message":"ok","data":{"costs":{"total":12.34}}}`), nil
 			default:
 				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
@@ -1730,6 +1742,12 @@ func TestGetClusterCostAllocationToolUsesExplicitWorkspaceOverride(t *testing.T)
 				if got := r.URL.Query().Get("workspace_uuid"); got != workspaceUUID {
 					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
 				}
+				if got := r.URL.Query().Get("aggregate"); got != "namespace" {
+					t.Fatalf("aggregate = %q, want %q", got, "namespace")
+				}
+				if got := r.URL.Query().Get("window"); got != "7d" {
+					t.Fatalf("window = %q, want %q", got, "7d")
+				}
 				return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","message":"ok","data":{"costs":{"total":7.89}}}`), nil
 			default:
 				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
@@ -1739,7 +1757,7 @@ func TestGetClusterCostAllocationToolUsesExplicitWorkspaceOverride(t *testing.T)
 	})
 
 	server := &Server{client: client}
-	result, err := server.getClusterCostAllocationTool(context.Background(), map[string]interface{}{"cluster_id": clusterUUID, "workspace_id": workspaceUUID})
+	result, err := server.getClusterCostAllocationTool(context.Background(), map[string]interface{}{"cluster_id": clusterUUID, "workspace_id": workspaceUUID, "aggregate": "namespace", "window": "7d"})
 	if err != nil {
 		t.Fatalf("getClusterCostAllocationTool error: %v", err)
 	}
@@ -1781,6 +1799,12 @@ func TestGetClusterCostAllocationToolRetriesAcrossWorkspaceCandidates(t *testing
 				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Clusters":[]}}}`), nil
 			case r.Method == http.MethodGet && r.URL.Path == "/cluster/"+clusterUUID+"/cost/allocation/compute":
 				attemptedWorkspaceUUIDs = append(attemptedWorkspaceUUIDs, r.URL.Query().Get("workspace_uuid"))
+				if got := r.URL.Query().Get("aggregate"); got != "namespace" {
+					t.Fatalf("aggregate = %q, want %q", got, "namespace")
+				}
+				if got := r.URL.Query().Get("window"); got != "30d" {
+					t.Fatalf("window = %q, want %q", got, "30d")
+				}
 				switch got := r.URL.Query().Get("workspace_uuid"); got {
 				case workspaceOne:
 					return jsonHTTPResponse(r, http.StatusBadRequest, `{"message":"invalid workspace"}`), nil

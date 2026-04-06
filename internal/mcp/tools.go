@@ -333,6 +333,8 @@ func (s *Server) toolDefinitions() []toolDefinition {
 					"cluster_id":   stringProperty("The cluster ID or UUID"),
 					"server_id":    stringProperty("Optional alias for cluster_id using existing server terminology"),
 					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+					"aggregate":    stringProperty("Optional cost aggregation, defaults to namespace"),
+					"window":       stringProperty("Optional time window such as 30d, defaults to 30d"),
 				}, "cluster_id"),
 			},
 			handler: s.getClusterCostAllocationTool,
@@ -1110,19 +1112,45 @@ func (s *Server) requestJSON(ctx context.Context, method, path string, body inte
 	return resp, nil
 }
 
-func withWorkspaceUUIDQuery(path, workspaceUUID string) string {
-	if strings.TrimSpace(workspaceUUID) == "" {
-		return path
-	}
-
+func withQueryValues(path string, values map[string]string) string {
 	parsed, err := url.Parse(path)
 	if err != nil {
 		return path
 	}
+
 	query := parsed.Query()
-	query.Set("workspace_uuid", workspaceUUID)
+	for key, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		query.Set(key, trimmed)
+	}
 	parsed.RawQuery = query.Encode()
 	return parsed.String()
+}
+
+func withWorkspaceUUIDQuery(path, workspaceUUID string) string {
+	if strings.TrimSpace(workspaceUUID) == "" {
+		return path
+	}
+	return withQueryValues(path, map[string]string{"workspace_uuid": workspaceUUID})
+}
+
+func withClusterCostAllocationQuery(path, workspaceUUID, aggregate, window string) string {
+	aggregate = strings.TrimSpace(aggregate)
+	if aggregate == "" {
+		aggregate = "namespace"
+	}
+	window = strings.TrimSpace(window)
+	if window == "" {
+		window = "30d"
+	}
+	return withQueryValues(path, map[string]string{
+		"workspace_uuid": workspaceUUID,
+		"aggregate":      aggregate,
+		"window":         window,
+	})
 }
 
 func (s *Server) requestBillingJSONWithWorkspaceFallback(ctx context.Context, method, path string, args map[string]interface{}, body interface{}, workspaceUUID *string) (map[string]interface{}, error) {
@@ -2943,6 +2971,8 @@ func (s *Server) getClusterCostAllocationTool(ctx context.Context, args map[stri
 		return nil, fmt.Errorf("cluster_id is required")
 	}
 	workspaceID, _ := args["workspace_id"].(string)
+	aggregate, _ := args["aggregate"].(string)
+	window, _ := args["window"].(string)
 
 	resolvedClusterID := clusterID
 	candidateWorkspaceUUIDs := make([]string, 0, 2)
@@ -2989,7 +3019,7 @@ func (s *Server) getClusterCostAllocationTool(ctx context.Context, args map[stri
 			}
 			attemptedWorkspaceUUIDs[workspaceUUID] = struct{}{}
 
-			resp, requestErr := s.requestJSON(ctx, http.MethodGet, withWorkspaceUUIDQuery(path, workspaceUUID), nil)
+			resp, requestErr := s.requestJSON(ctx, http.MethodGet, withClusterCostAllocationQuery(path, workspaceUUID, aggregate, window), nil)
 			if requestErr == nil {
 				return jsonResult(resp)
 			}
