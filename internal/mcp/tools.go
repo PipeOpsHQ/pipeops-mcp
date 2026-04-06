@@ -1297,6 +1297,11 @@ type cloudProviderInstanceTypesArgs struct {
 	Region        string `json:"region"`
 }
 
+type workspaceReference struct {
+	ID   string
+	UUID string
+}
+
 func (s *Server) listProjectsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	var opts *pipeops.ProjectListOptions
 	if len(args) > 0 {
@@ -1307,67 +1312,49 @@ func (s *Server) listProjectsTool(ctx context.Context, args map[string]interface
 		opts = decoded
 	}
 
+	var (
+		resp map[string]interface{}
+		err  error
+	)
 	if opts != nil && (opts.WorkspaceID != "" || opts.WorkspaceUUID != "") {
-		resp, _, err := s.client.Projects.List(ctx, opts)
-		if err != nil {
-			return nil, err
+		workspaceID := opts.WorkspaceUUID
+		if workspaceID == "" {
+			workspaceID = opts.WorkspaceID
 		}
-		return jsonResult(resp)
+		resp, err = s.listProjectsForWorkspace(ctx, workspaceID, opts)
+	} else {
+		resp, err = s.listProjectsAcrossWorkspaces(ctx, opts)
 	}
-
-	resp, err := s.listProjectsAcrossWorkspaces(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
 	return jsonResult(resp)
 }
 
-func (s *Server) listProjectsAcrossWorkspaces(ctx context.Context, opts *pipeops.ProjectListOptions) (*pipeops.ProjectsResponse, error) {
-	workspacesResp, _, err := s.client.Workspaces.List(ctx)
+func (s *Server) listProjectsAcrossWorkspaces(ctx context.Context, opts *pipeops.ProjectListOptions) (map[string]interface{}, error) {
+	workspaces, status, message, err := s.listWorkspaceReferences(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	projectsResp := &pipeops.ProjectsResponse{
-		Status:  workspacesResp.Status,
-		Message: workspacesResp.Message,
-	}
+	projects := make([]map[string]interface{}, 0)
 	seen := make(map[string]struct{})
-
-	for _, workspace := range workspacesResp.Data.Workspaces {
-		workspaceID := workspace.UUID
-		if workspaceID == "" {
-			workspaceID = workspace.ID
-		}
-		if workspaceID == "" {
-			continue
-		}
-
-		wsOpts := &pipeops.ProjectListOptions{
-			WorkspaceUUID: workspaceID,
-			WorkspaceID:   workspaceID,
-			Limit:         1000,
-		}
-		if opts != nil {
-			wsOpts.ServerID = opts.ServerID
-		}
-
-		workspaceProjects, _, workspaceErr := s.client.Projects.List(ctx, wsOpts)
+	for _, workspace := range workspaces {
+		workspaceProjects, workspaceStatus, workspaceMessage, workspaceErr := s.fetchProjectsForWorkspaceReference(ctx, workspace)
 		if workspaceErr != nil {
 			return nil, workspaceErr
 		}
-		if projectsResp.Status == "" {
-			projectsResp.Status = workspaceProjects.Status
+		if status == "" {
+			status = workspaceStatus
 		}
-		if projectsResp.Message == "" {
-			projectsResp.Message = workspaceProjects.Message
+		if message == "" {
+			message = workspaceMessage
 		}
-
-		for _, project := range workspaceProjects.Data.Projects {
-			projectKey := project.UUID
-			if projectKey == "" {
-				projectKey = project.ID.String()
+		for _, project := range workspaceProjects {
+			if opts != nil && opts.ServerID != "" && !projectMatchesServerID(project, opts.ServerID) {
+				continue
 			}
+			projectKey := projectIdentity(project)
 			if projectKey == "" {
 				continue
 			}
@@ -1375,18 +1362,234 @@ func (s *Server) listProjectsAcrossWorkspaces(ctx context.Context, opts *pipeops
 				continue
 			}
 			seen[projectKey] = struct{}{}
-			projectsResp.Data.Projects = append(projectsResp.Data.Projects, project)
+			projects = append(projects, normalizeProject(project))
 		}
 	}
 
 	if opts != nil {
-		projectsResp.Data.Projects = paginateProjects(projectsResp.Data.Projects, opts.Page, opts.Limit)
+		projects = paginateProjects(projects, opts.Page, opts.Limit)
 	}
 
-	return projectsResp, nil
+	return map[string]interface{}{
+		"status":  responseStatus(status),
+		"message": message,
+		"data": map[string]interface{}{
+			"projects": projects,
+		},
+	}, nil
 }
 
-func paginateProjects(projects []pipeops.Project, page, limit int) []pipeops.Project {
+func (s *Server) listProjectsForWorkspace(ctx context.Context, workspaceID string, opts *pipeops.ProjectListOptions) (map[string]interface{}, error) {
+	workspaceRef, err := s.resolveWorkspaceReference(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	projects, status, message, err := s.fetchProjectsForWorkspaceReference(ctx, workspaceRef)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]map[string]interface{}, 0, len(projects))
+	for _, project := range projects {
+		if opts != nil && opts.ServerID != "" && !projectMatchesServerID(project, opts.ServerID) {
+			continue
+		}
+		filtered = append(filtered, normalizeProject(project))
+	}
+	if opts != nil {
+		filtered = paginateProjects(filtered, opts.Page, opts.Limit)
+	}
+
+	return map[string]interface{}{
+		"status":  responseStatus(status),
+		"message": message,
+		"data": map[string]interface{}{
+			"projects": filtered,
+		},
+	}, nil
+}
+
+func (s *Server) resolveWorkspaceReference(ctx context.Context, workspaceID string) (workspaceReference, error) {
+	ref := workspaceReference{UUID: workspaceID, ID: workspaceID}
+	workspaces, _, _, err := s.listWorkspaceReferences(ctx)
+	if err != nil {
+		return ref, nil
+	}
+	for _, workspace := range workspaces {
+		if workspace.UUID == workspaceID || workspace.ID == workspaceID {
+			return workspace, nil
+		}
+	}
+	return ref, nil
+}
+
+func (s *Server) fetchProjectsForWorkspaceReference(ctx context.Context, workspace workspaceReference) ([]map[string]interface{}, string, string, error) {
+	identifiers := workspaceReferenceIdentifiers(workspace)
+	var lastErr error
+	for _, identifier := range identifiers {
+		projects, status, message, err := s.fetchWorkspaceProjects(ctx, identifier)
+		if err == nil {
+			return projects, status, message, nil
+		}
+		if !isWorkspaceProjectsFallbackError(err) {
+			return nil, "", "", err
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, "", "", lastErr
+	}
+	return []map[string]interface{}{}, "success", "", nil
+}
+
+func (s *Server) listWorkspaceReferences(ctx context.Context) ([]workspaceReference, string, string, error) {
+	req, err := s.client.NewRequest(http.MethodGet, "workspace", nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	var envelope struct {
+		Success bool            `json:"success,omitempty"`
+		Status  string          `json:"status,omitempty"`
+		Message string          `json:"message,omitempty"`
+		Data    json.RawMessage `json:"data,omitempty"`
+	}
+	if _, err := s.client.Do(ctx, req, &envelope); err != nil {
+		return nil, "", "", err
+	}
+
+	workspaces, err := parseWorkspaceReferences(envelope.Data)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return workspaces, envelopeStatus(envelope.Status, envelope.Success), envelope.Message, nil
+}
+
+func parseWorkspaceReferences(data json.RawMessage) ([]workspaceReference, error) {
+	items, err := asMapSlice(data)
+	if err != nil {
+		var wrapped map[string]interface{}
+		if err := json.Unmarshal(data, &wrapped); err != nil {
+			return nil, err
+		}
+		items = mapSliceValue(wrapped, "workspaces", "Workspaces")
+	}
+
+	workspaces := make([]workspaceReference, 0, len(items))
+	for _, item := range items {
+		workspace := workspaceReference{
+			ID:   extractString(lookupValue(item, "id", "ID")),
+			UUID: extractString(lookupValue(item, "uuid", "UUID")),
+		}
+		if workspace.ID == "" && workspace.UUID == "" {
+			continue
+		}
+		workspaces = append(workspaces, workspace)
+	}
+	return workspaces, nil
+}
+
+func (s *Server) fetchWorkspaceProjects(ctx context.Context, workspaceID string) ([]map[string]interface{}, string, string, error) {
+	req, err := s.client.NewRequest(http.MethodGet, fmt.Sprintf("workspace/fetch/%s", workspaceID), nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	var envelope struct {
+		Success bool            `json:"success,omitempty"`
+		Status  string          `json:"status,omitempty"`
+		Message string          `json:"message,omitempty"`
+		Data    json.RawMessage `json:"data,omitempty"`
+	}
+	if _, err := s.client.Do(ctx, req, &envelope); err != nil {
+		return nil, "", "", err
+	}
+
+	projects, err := parseWorkspaceProjects(envelope.Data)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return projects, envelopeStatus(envelope.Status, envelope.Success), envelope.Message, nil
+}
+
+func parseWorkspaceProjects(data json.RawMessage) ([]map[string]interface{}, error) {
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+
+	workspaceValue := lookupValue(payload, "workspace", "Workspace")
+	workspace, ok := workspaceValue.(map[string]interface{})
+	if !ok {
+		workspace = payload
+	}
+	projects := mapSliceValue(workspace, "projects", "Projects")
+	return projects, nil
+}
+
+func workspaceReferenceIdentifiers(workspace workspaceReference) []string {
+	identifiers := make([]string, 0, 2)
+	appendIdentifier := func(value string) {
+		if value == "" {
+			return
+		}
+		for _, existing := range identifiers {
+			if existing == value {
+				return
+			}
+		}
+		identifiers = append(identifiers, value)
+	}
+	appendIdentifier(workspace.UUID)
+	appendIdentifier(workspace.ID)
+	return identifiers
+}
+
+func normalizeProject(project map[string]interface{}) map[string]interface{} {
+	normalized := make(map[string]interface{}, len(project)+3)
+	for key, value := range project {
+		normalized[key] = value
+	}
+	if _, ok := normalized["UUID"]; !ok {
+		if uuid := extractString(lookupValue(project, "UUID", "uuid")); uuid != "" {
+			normalized["UUID"] = uuid
+		}
+	}
+	if _, ok := normalized["ID"]; !ok {
+		if id := extractString(lookupValue(project, "ID", "id")); id != "" {
+			normalized["ID"] = id
+		}
+	}
+	if _, ok := normalized["Name"]; !ok {
+		if name := extractString(lookupValue(project, "Name", "name")); name != "" {
+			normalized["Name"] = name
+		}
+	}
+	return normalized
+}
+
+func projectMatchesServerID(project map[string]interface{}, serverID string) bool {
+	if serverID == "" {
+		return true
+	}
+	for _, key := range []string{"server_id", "ServerID", "cluster_uuid", "ClusterUUID"} {
+		if extractString(lookupValue(project, key)) == serverID {
+			return true
+		}
+	}
+	return false
+}
+
+func projectIdentity(project map[string]interface{}) string {
+	for _, key := range []string{"UUID", "uuid", "ProjectUUID", "project_uuid", "ID", "id"} {
+		if value := extractString(lookupValue(project, key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func paginateProjects(projects []map[string]interface{}, page, limit int) []map[string]interface{} {
 	if limit <= 0 {
 		return projects
 	}
@@ -1396,7 +1599,7 @@ func paginateProjects(projects []pipeops.Project, page, limit int) []pipeops.Pro
 
 	start := (page - 1) * limit
 	if start >= len(projects) {
-		return []pipeops.Project{}
+		return []map[string]interface{}{}
 	}
 
 	end := start + limit
@@ -1405,6 +1608,80 @@ func paginateProjects(projects []pipeops.Project, page, limit int) []pipeops.Pro
 	}
 
 	return projects[start:end]
+}
+
+func mapSliceValue(payload map[string]interface{}, keys ...string) []map[string]interface{} {
+	value := lookupValue(payload, keys...)
+	slice, ok := value.([]interface{})
+	if !ok {
+		return []map[string]interface{}{}
+	}
+
+	items := make([]map[string]interface{}, 0, len(slice))
+	for _, item := range slice {
+		if asMap, ok := item.(map[string]interface{}); ok {
+			items = append(items, asMap)
+		}
+	}
+	return items
+}
+
+func asMapSlice(data json.RawMessage) ([]map[string]interface{}, error) {
+	var slice []map[string]interface{}
+	if err := json.Unmarshal(data, &slice); err != nil {
+		return nil, err
+	}
+	return slice, nil
+}
+
+func lookupValue(payload map[string]interface{}, keys ...string) interface{} {
+	for _, key := range keys {
+		if value, ok := payload[key]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func extractString(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	default:
+		return fmt.Sprintf("%v", typed)
+	}
+}
+
+func responseStatus(status string) string {
+	if status != "" {
+		return status
+	}
+	return "success"
+}
+
+func envelopeStatus(status string, success bool) string {
+	if status != "" {
+		return status
+	}
+	if success {
+		return "success"
+	}
+	return "error"
+}
+
+func isWorkspaceProjectsFallbackError(err error) bool {
+	apiErr, ok := err.(*pipeops.ErrorResponse)
+	if !ok || apiErr.Response == nil {
+		return false
+	}
+	switch apiErr.Response.StatusCode {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) getProjectTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
