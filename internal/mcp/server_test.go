@@ -194,6 +194,26 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		t.Error("Expected list_servers to expose workspace_id filter")
 	}
 
+	deployAddOn := toolByName["deploy_addon"]
+	deployAddOnProperties, ok := deployAddOn.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected deploy_addon properties schema")
+	}
+
+	if _, ok := deployAddOnProperties["workspace_id"]; !ok {
+		t.Error("Expected deploy_addon to expose workspace_id override")
+	}
+
+	listAddOnDeployments := toolByName["list_addon_deployments"]
+	listAddOnDeploymentsProperties, ok := listAddOnDeployments.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected list_addon_deployments properties schema")
+	}
+
+	if _, ok := listAddOnDeploymentsProperties["workspace_id"]; !ok {
+		t.Error("Expected list_addon_deployments to expose workspace_id filter")
+	}
+
 	listEnvironments := toolByName["list_environments"]
 	if _, ok := listEnvironments.InputSchema["required"]; ok {
 		t.Error("Did not expect list_environments to require project_id")
@@ -739,6 +759,150 @@ func jsonHTTPResponse(req *http.Request, statusCode int, body string) *http.Resp
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Request:    req,
+	}
+}
+
+func TestListAddOnDeploymentsToolUsesExplicitWorkspace(t *testing.T) {
+	t.Parallel()
+
+	workspaceLookups := 0
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/workspace":
+				workspaceLookups++
+				t.Fatalf("unexpected workspace lookup")
+				return nil, nil
+			case "/addons/deployments/overview":
+				if r.Method != http.MethodGet {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+				}
+				if got := r.URL.Query().Get("workspace"); got != "ws_explicit" {
+					t.Fatalf("workspace = %q, want %q", got, "ws_explicit")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":[{"UID":"dep_1","Name":"Redis"}]}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listAddOnDeploymentsTool(context.Background(), map[string]interface{}{"workspace_id": "ws_explicit"})
+	if err != nil {
+		t.Fatalf("listAddOnDeploymentsTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if workspaceLookups != 0 {
+		t.Fatalf("workspace lookups = %d, want 0", workspaceLookups)
+	}
+}
+
+func TestListAddOnDeploymentsToolFallsBackToFirstWorkspace(t *testing.T) {
+	t.Parallel()
+
+	workspaceLookups := 0
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/workspace":
+				workspaceLookups++
+				if r.Method != http.MethodGet {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"id":"1","uuid":"ws_first"},{"id":"2","uuid":"ws_second"}]}`), nil
+			case "/addons/deployments/overview":
+				if r.Method != http.MethodGet {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+				}
+				if got := r.URL.Query().Get("workspace"); got != "ws_first" {
+					t.Fatalf("workspace = %q, want %q", got, "ws_first")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":[{"UID":"dep_1","Name":"Redis"}]}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listAddOnDeploymentsTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listAddOnDeploymentsTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if workspaceLookups != 1 {
+		t.Fatalf("workspace lookups = %d, want 1", workspaceLookups)
+	}
+}
+
+func TestDeployAddOnToolFallsBackToFirstWorkspace(t *testing.T) {
+	t.Parallel()
+
+	workspaceLookups := 0
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/workspace":
+				workspaceLookups++
+				if r.Method != http.MethodGet {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"uuid":"ws_default"}]}`), nil
+			case "/addons/deploy":
+				if r.Method != http.MethodPost {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodPost)
+				}
+				body, readErr := io.ReadAll(r.Body)
+				if readErr != nil {
+					t.Fatalf("ReadAll body error: %v", readErr)
+				}
+				var payload map[string]interface{}
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("unmarshal body error: %v", err)
+				}
+				if got := payload["id"]; got != "addon_123" {
+					t.Fatalf("id = %#v, want %q", got, "addon_123")
+				}
+				if got := payload["Workspace"]; got != "ws_default" {
+					t.Fatalf("Workspace = %#v, want %q", got, "ws_default")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","data":{"deployment":{"UID":"dep_1"}}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.deployAddOnTool(context.Background(), map[string]interface{}{"addon_id": "addon_123"})
+	if err != nil {
+		t.Fatalf("deployAddOnTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if workspaceLookups != 1 {
+		t.Fatalf("workspace lookups = %d, want 1", workspaceLookups)
 	}
 }
 

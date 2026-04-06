@@ -618,10 +618,11 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				Name:        "deploy_addon",
 				Description: "Deploy an add-on to a project or server",
 				InputSchema: objectSchema(map[string]interface{}{
-					"addon_id":   stringProperty("The add-on ID or UUID to deploy"),
-					"project_id": stringProperty("Optional project ID to attach the deployment to"),
-					"server_id":  stringProperty("Optional server ID to attach the deployment to"),
-					"config":     objectProperty("Optional deployment configuration", true),
+					"addon_id":     stringProperty("The add-on ID or UUID to deploy"),
+					"project_id":   stringProperty("Optional project ID to attach the deployment to"),
+					"server_id":    stringProperty("Optional server ID to attach the deployment to"),
+					"workspace_id": stringProperty("Optional workspace ID to scope the deployment; defaults to the first available workspace"),
+					"config":       objectProperty("Optional deployment configuration", true),
 				}, "addon_id"),
 			},
 			handler: s.deployAddOnTool,
@@ -630,7 +631,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			tool: Tool{
 				Name:        "list_addon_deployments",
 				Description: "List add-on deployments",
-				InputSchema: emptySchema(),
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID to scope deployments; defaults to the first available workspace"),
+				}),
 			},
 			handler: s.listAddOnDeploymentsTool,
 		},
@@ -1028,6 +1031,30 @@ func (s *Server) resolveWorkspaceID(ctx context.Context, args map[string]interfa
 	return "", fmt.Errorf("workspace_id is required")
 }
 
+func (s *Server) resolveDefaultWorkspaceID(ctx context.Context, args map[string]interface{}) (string, error) {
+	if workspaceID, ok := args["workspace_id"].(string); ok && workspaceID != "" {
+		return workspaceID, nil
+	}
+
+	resp, _, err := s.client.Workspaces.List(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.Data.Workspaces) == 0 {
+		return "", fmt.Errorf("workspace_id is required")
+	}
+
+	workspace := resp.Data.Workspaces[0]
+	if workspace.UUID != "" {
+		return workspace.UUID, nil
+	}
+	if workspace.ID != "" {
+		return workspace.ID, nil
+	}
+
+	return "", fmt.Errorf("workspace_id is required")
+}
+
 func jsonResult(v interface{}) (interface{}, error) {
 	return map[string]interface{}{
 		"content": []interface{}{
@@ -1150,10 +1177,11 @@ type updateTeamMemberRoleArgs struct {
 }
 
 type deployAddOnArgs struct {
-	AddOnID   string                 `json:"addon_id"`
-	ProjectID string                 `json:"project_id,omitempty"`
-	ServerID  string                 `json:"server_id,omitempty"`
-	Config    map[string]interface{} `json:"config,omitempty"`
+	AddOnID     string                 `json:"addon_id"`
+	ProjectID   string                 `json:"project_id,omitempty"`
+	ServerID    string                 `json:"server_id,omitempty"`
+	WorkspaceID string                 `json:"workspace_id,omitempty"`
+	Config      map[string]interface{} `json:"config,omitempty"`
 }
 
 type addOnDeploymentArgs struct {
@@ -2146,10 +2174,16 @@ func (s *Server) deployAddOnTool(ctx context.Context, args map[string]interface{
 		return nil, fmt.Errorf("addon_id is required")
 	}
 
+	workspaceID, err := s.resolveDefaultWorkspaceID(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
 	resp, _, err := s.client.AddOns.Deploy(ctx, &pipeops.DeployAddOnRequest{
 		ID:        req.AddOnID,
 		ProjectID: req.ProjectID,
 		Server:    req.ServerID,
+		Workspace: workspaceID,
 		Config:    req.Config,
 	})
 	if err != nil {
@@ -2158,8 +2192,13 @@ func (s *Server) deployAddOnTool(ctx context.Context, args map[string]interface{
 	return jsonResult(resp)
 }
 
-func (s *Server) listAddOnDeploymentsTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.AddOns.ListDeployments(ctx)
+func (s *Server) listAddOnDeploymentsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	workspaceID, err := s.resolveDefaultWorkspaceID(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.AddOns.ListDeployments(ctx, &pipeops.ListDeploymentsOptions{WorkspaceUUID: workspaceID})
 	if err != nil {
 		return nil, err
 	}
