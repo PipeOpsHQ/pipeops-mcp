@@ -329,8 +329,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				Name:        "get_cluster_cost_allocation",
 				Description: "Get compute cost allocation for a cluster",
 				InputSchema: objectSchema(map[string]interface{}{
-					"cluster_id": stringProperty("The cluster ID or UUID"),
-					"server_id":  stringProperty("Optional alias for cluster_id using existing server terminology"),
+					"cluster_id":   stringProperty("The cluster ID or UUID"),
+					"server_id":    stringProperty("Optional alias for cluster_id using existing server terminology"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
 				}, "cluster_id"),
 			},
 			handler: s.getClusterCostAllocationTool,
@@ -1944,6 +1945,183 @@ func (s *Server) findProjectReference(ctx context.Context, projectID, workspaceI
 	return workspaceReference{}, nil, nil
 }
 
+func normalizeCluster(cluster map[string]interface{}, workspace map[string]interface{}) map[string]interface{} {
+	base := cluster
+	if nested, ok := lookupValue(cluster, "Cluster", "cluster").(map[string]interface{}); ok {
+		base = nested
+	}
+
+	normalized := make(map[string]interface{}, len(cluster)+len(base)+4)
+	for key, value := range cluster {
+		normalized[key] = value
+	}
+	for key, value := range base {
+		normalized[key] = value
+	}
+	if _, ok := normalized["UUID"]; !ok {
+		if uuid := extractString(lookupValue(base, "UUID", "uuid", "ClusterUUID", "cluster_uuid")); uuid != "" {
+			normalized["UUID"] = uuid
+		}
+	}
+	if _, ok := normalized["ID"]; !ok {
+		if id := extractString(lookupValue(base, "ID", "id")); id != "" {
+			normalized["ID"] = id
+		}
+	}
+	if _, ok := normalized["Name"]; !ok {
+		if name := extractString(lookupValue(base, "Name", "name")); name != "" {
+			normalized["Name"] = name
+		}
+	}
+	if _, ok := normalized["NameSlug"]; !ok {
+		if nameSlug := extractString(lookupValue(base, "NameSlug", "name_slug", "Slug", "slug")); nameSlug != "" {
+			normalized["NameSlug"] = nameSlug
+		}
+	}
+	if _, ok := normalized["WorkspaceUUID"]; !ok {
+		if workspaceUUID := extractString(lookupValue(base, "WorkspaceUUID", "workspace_uuid")); workspaceUUID != "" {
+			normalized["WorkspaceUUID"] = workspaceUUID
+		} else if workspaceUUID := extractString(lookupValue(workspace, "UUID", "uuid")); workspaceUUID != "" {
+			normalized["WorkspaceUUID"] = workspaceUUID
+		}
+	}
+	return normalized
+}
+
+func clusterIdentity(cluster map[string]interface{}) string {
+	for _, key := range []string{"UUID", "uuid", "ClusterUUID", "cluster_uuid", "ID", "id"} {
+		if value := extractString(lookupValue(cluster, key)); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func clusterMatchesIdentifier(cluster map[string]interface{}, identifier string) bool {
+	for _, key := range []string{"UUID", "uuid", "ClusterUUID", "cluster_uuid", "ID", "id", "Name", "name", "NameSlug", "name_slug", "Slug", "slug", "ServerCode", "server_code"} {
+		if extractString(lookupValue(cluster, key)) == identifier {
+			return true
+		}
+	}
+	for _, key := range []string{"Name", "name", "NameSlug", "name_slug", "Slug", "slug"} {
+		if strings.EqualFold(extractString(lookupValue(cluster, key)), identifier) {
+			return true
+		}
+	}
+	return false
+}
+
+func clusterWorkspaceUUID(cluster map[string]interface{}, workspace workspaceReference) string {
+	candidates := []string{
+		extractString(lookupValue(cluster, "WorkspaceUUID", "workspace_uuid")),
+		workspace.UUID,
+		extractString(lookupValue(cluster, "WorkspaceID", "workspace_id")),
+	}
+	for _, candidate := range candidates {
+		if isLikelyUUID(candidate) {
+			return candidate
+		}
+	}
+	for _, candidate := range candidates {
+		if isUsableWorkspaceIdentifier(candidate) {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func (s *Server) fetchClustersForWorkspaceReference(ctx context.Context, workspace workspaceReference) ([]map[string]interface{}, string, string, error) {
+	identifiers := workspaceReferenceIdentifiers(workspace)
+	var lastErr error
+	for _, identifier := range identifiers {
+		clusters, status, message, err := s.fetchWorkspaceClusters(ctx, identifier)
+		if err == nil {
+			return clusters, status, message, nil
+		}
+		if !isWorkspaceProjectsFallbackError(err) {
+			return nil, "", "", err
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, "", "", lastErr
+	}
+	return []map[string]interface{}{}, "success", "", nil
+}
+
+func (s *Server) fetchWorkspaceClusters(ctx context.Context, workspaceID string) ([]map[string]interface{}, string, string, error) {
+	req, err := s.client.NewRequest(http.MethodGet, fmt.Sprintf("workspace/fetch/%s", workspaceID), nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	var envelope struct {
+		Success bool            `json:"success,omitempty"`
+		Status  string          `json:"status,omitempty"`
+		Message string          `json:"message,omitempty"`
+		Data    json.RawMessage `json:"data,omitempty"`
+	}
+	if _, err := s.client.Do(ctx, req, &envelope); err != nil {
+		return nil, "", "", err
+	}
+
+	clusters, err := parseWorkspaceClusters(envelope.Data)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return clusters, envelopeStatus(envelope.Status, envelope.Success), envelope.Message, nil
+}
+
+func parseWorkspaceClusters(data json.RawMessage) ([]map[string]interface{}, error) {
+	workspace, err := extractWorkspacePayload(data)
+	if err != nil {
+		return nil, err
+	}
+
+	clusters := mapSliceValue(workspace, "clusters", "Clusters")
+	normalized := make([]map[string]interface{}, 0, len(clusters))
+	for _, cluster := range clusters {
+		normalized = append(normalized, normalizeCluster(cluster, workspace))
+	}
+	return normalized, nil
+}
+
+func (s *Server) findClusterReference(ctx context.Context, clusterID, workspaceID string) (workspaceReference, map[string]interface{}, error) {
+	var (
+		workspaces []workspaceReference
+		err        error
+	)
+	if workspaceID != "" {
+		workspace, resolveErr := s.resolveWorkspaceReference(ctx, workspaceID)
+		if resolveErr != nil {
+			return workspaceReference{}, nil, resolveErr
+		}
+		workspaces = []workspaceReference{workspace}
+	} else {
+		workspaces, _, _, err = s.listWorkspaceReferences(ctx)
+		if err != nil {
+			return workspaceReference{}, nil, err
+		}
+	}
+
+	for _, workspace := range workspaces {
+		clusters, _, _, fetchErr := s.fetchClustersForWorkspaceReference(ctx, workspace)
+		if fetchErr != nil {
+			if isWorkspaceProjectsFallbackError(fetchErr) {
+				continue
+			}
+			return workspaceReference{}, nil, fetchErr
+		}
+		for _, cluster := range clusters {
+			if clusterMatchesIdentifier(cluster, clusterID) {
+				return workspace, cluster, nil
+			}
+		}
+	}
+
+	return workspaceReference{}, nil, nil
+}
+
 func paginateProjects(projects []map[string]interface{}, page, limit int) []map[string]interface{} {
 	if limit <= 0 {
 		return projects
@@ -2570,8 +2748,32 @@ func (s *Server) getClusterCostAllocationTool(ctx context.Context, args map[stri
 	if clusterID == "" {
 		return nil, fmt.Errorf("cluster_id is required")
 	}
+	workspaceID, _ := args["workspace_id"].(string)
 
-	resp, _, err := s.client.Servers.GetClusterCostAllocation(ctx, clusterID)
+	workspace, cluster, err := s.findClusterReference(ctx, clusterID, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if cluster == nil && workspaceID == "" {
+		return nil, fmt.Errorf("cluster %q not found", clusterID)
+	}
+
+	resolvedClusterID := clusterID
+	if clusterIdentityValue := clusterIdentity(cluster); clusterIdentityValue != "" {
+		resolvedClusterID = clusterIdentityValue
+	}
+	resolvedWorkspaceUUID := clusterWorkspaceUUID(cluster, workspace)
+	if resolvedWorkspaceUUID == "" && workspaceID != "" {
+		resolvedWorkspaceUUID, err = s.resolveDefaultWorkspaceUUID(ctx, map[string]interface{}{"workspace_id": workspaceID})
+		if err != nil {
+			return nil, err
+		}
+	}
+	if resolvedWorkspaceUUID == "" {
+		return nil, fmt.Errorf("workspace not found for cluster %q", clusterID)
+	}
+
+	resp, err := s.requestJSON(ctx, http.MethodGet, withWorkspaceUUIDQuery(fmt.Sprintf("cluster/%s/cost/allocation/compute", resolvedClusterID), resolvedWorkspaceUUID), nil)
 	if err != nil {
 		return nil, err
 	}
