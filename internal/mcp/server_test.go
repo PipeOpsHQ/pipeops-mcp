@@ -3,7 +3,13 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
+
+	"github.com/PipeOpsHQ/pipeops-go-sdk/pipeops"
 )
 
 func TestHandleInitialize(t *testing.T) {
@@ -717,5 +723,151 @@ func TestHandleToolsCallValidatesRequiredArguments(t *testing.T) {
 
 	if err.Error() != "instance_class is required" {
 		t.Fatalf("Expected instance_class error, got %v", err)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func jsonHTTPResponse(req *http.Request, statusCode int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: statusCode,
+		Status:     fmt.Sprintf("%d %s", statusCode, http.StatusText(statusCode)),
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}
+}
+
+func TestGetBillingInfoToolUsesSupportedControllerEndpoints(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+
+			switch r.URL.Path {
+			case "/billing/balance":
+				if r.Method != http.MethodGet {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":{"Balance":"0.01","Currency":"USD"},"message":"ok","success":true}`), nil
+			case "/billing/subscriptions/current":
+				if r.Method != http.MethodGet {
+					t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":{"UID":"sub_123","PlanTier":"startup","PlanName":"Start-up","Amount":"34.99","BillingType":"trial","Status":"active"},"message":"ok","success":true}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getBillingInfoTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("getBillingInfoTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected result to be a map")
+	}
+
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+
+	balance, ok := data["balance"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected balance map, got %v", data["balance"])
+	}
+	if balance["Balance"] != "0.01" {
+		t.Fatalf("balance Balance = %v, want %v", balance["Balance"], "0.01")
+	}
+
+	currentSubscription, ok := data["current_subscription"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected current_subscription map, got %v", data["current_subscription"])
+	}
+	if currentSubscription["PlanTier"] != "startup" {
+		t.Fatalf("PlanTier = %v, want %v", currentSubscription["PlanTier"], "startup")
+	}
+
+	if requests["/billing/balance"] != 1 {
+		t.Fatalf("billing/balance requests = %d, want 1", requests["/billing/balance"])
+	}
+	if requests["/billing/subscriptions/current"] != 1 {
+		t.Fatalf("billing/subscriptions/current requests = %d, want 1", requests["/billing/subscriptions/current"])
+	}
+}
+
+func TestGetBillingInfoToolAllowsMissingCurrentSubscription(t *testing.T) {
+	t.Parallel()
+
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/billing/balance":
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":{"Balance":"10.00","Currency":"USD"},"message":"ok","success":true}`), nil
+			case "/billing/subscriptions/current":
+				return jsonHTTPResponse(r, http.StatusNotFound, `{"message":"not found"}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getBillingInfoTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("getBillingInfoTool error: %v", err)
+	}
+
+	resultMap := result.(map[string]interface{})
+	content := resultMap["content"].([]interface{})
+	textContent := content[0].(map[string]interface{})["text"].(string)
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+
+	data := payload["data"].(map[string]interface{})
+	if _, ok := data["balance"].(map[string]interface{}); !ok {
+		t.Fatalf("Expected balance map, got %v", data["balance"])
+	}
+	if data["current_subscription"] != nil {
+		t.Fatalf("Expected nil current_subscription, got %v", data["current_subscription"])
 	}
 }

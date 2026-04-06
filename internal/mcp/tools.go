@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/PipeOpsHQ/pipeops-go-sdk/pipeops"
 )
@@ -692,7 +694,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_billing_info",
-				Description: "Get billing usage information for the account",
+				Description: "Get current billing balance and subscription information for the account",
 				InputSchema: emptySchema(),
 			},
 			handler: s.getBillingInfoTool,
@@ -1035,6 +1037,37 @@ func jsonResult(v interface{}) (interface{}, error) {
 			},
 		},
 	}, nil
+}
+
+func (s *Server) requestJSON(ctx context.Context, method, path string, body interface{}) (map[string]interface{}, error) {
+	req, err := s.client.NewRequest(method, path, body)
+	if err != nil {
+		return nil, err
+	}
+
+	var resp map[string]interface{}
+	if _, err := s.client.Do(ctx, req, &resp); err != nil {
+		return nil, err
+	}
+
+	return resp, nil
+}
+
+func responseData(resp map[string]interface{}) interface{} {
+	if data, ok := resp["data"]; ok {
+		return data
+	}
+
+	return resp
+}
+
+func isHTTPStatus(err error, statusCode int) bool {
+	var apiErr *pipeops.ErrorResponse
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+
+	return apiErr.Response != nil && apiErr.Response.StatusCode == statusCode
 }
 
 func textResult(text string) interface{} {
@@ -2213,11 +2246,30 @@ func (s *Server) getMyAddOnSubmissionsTool(ctx context.Context, _ map[string]int
 }
 
 func (s *Server) getBillingInfoTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.Billing.GetUsage(ctx)
+	balanceResp, err := s.requestJSON(ctx, http.MethodGet, "billing/balance", nil)
 	if err != nil {
 		return nil, err
 	}
-	return jsonResult(resp)
+
+	billingInfo := map[string]interface{}{
+		"success": true,
+		"message": "Billing information retrieved successfully",
+		"data": map[string]interface{}{
+			"balance": responseData(balanceResp),
+		},
+	}
+
+	currentSubscriptionResp, err := s.requestJSON(ctx, http.MethodGet, "billing/subscriptions/current", nil)
+	if err != nil {
+		if !isHTTPStatus(err, http.StatusNotFound) {
+			return nil, err
+		}
+		billingInfo["data"].(map[string]interface{})["current_subscription"] = nil
+		return jsonResult(billingInfo)
+	}
+
+	billingInfo["data"].(map[string]interface{})["current_subscription"] = responseData(currentSubscriptionResp)
+	return jsonResult(billingInfo)
 }
 
 func (s *Server) listBillingPlansTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {

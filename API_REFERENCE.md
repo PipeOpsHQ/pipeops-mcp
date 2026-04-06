@@ -531,13 +531,13 @@ Who am I logged in as?
 
 ### get_billing_info
 
-Get current billing usage and information.
+Get current billing balance and subscription information.
 
 **Arguments:** None
 
 **Example:**
 ```
-What's my current PipeOps usage?
+What's my current PipeOps billing status?
 ```
 or
 ```
@@ -547,26 +547,21 @@ Show me my billing information
 **Response:**
 ```json
 {
-  "status": "success",
-  "message": "Usage retrieved successfully",
+  "success": true,
+  "message": "Billing information retrieved successfully",
   "data": {
-    "usage": [
-      {
-        "resource_type": "compute",
-        "amount": 120.5,
-        "unit": "hours",
-        "cost": 24.10,
-        "period": "2024-10"
-      },
-      {
-        "resource_type": "storage",
-        "amount": 50.0,
-        "unit": "GB",
-        "cost": 5.00,
-        "period": "2024-10"
-      }
-    ],
-    "total": 29.10
+    "balance": {
+      "Balance": "0.01",
+      "Currency": "USD"
+    },
+    "current_subscription": {
+      "UID": "222882c6-13d1-4e06-abff-a53a333849db",
+      "PlanTier": "startup",
+      "PlanName": "Start-up",
+      "Amount": "34.99",
+      "BillingType": "trial",
+      "Status": "active"
+    }
   }
 }
 ```
