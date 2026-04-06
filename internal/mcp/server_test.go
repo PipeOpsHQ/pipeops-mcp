@@ -194,6 +194,16 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		t.Error("Expected get_project to expose workspace_id override")
 	}
 
+	getProjectLogs := toolByName["get_project_logs"]
+	getProjectLogsProperties, ok := getProjectLogs.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected get_project_logs properties schema")
+	}
+
+	if _, ok := getProjectLogsProperties["workspace_id"]; !ok {
+		t.Error("Expected get_project_logs to expose workspace_id override")
+	}
+
 	listServers := toolByName["list_servers"]
 	listServersProperties, ok := listServers.InputSchema["properties"].(map[string]interface{})
 	if !ok {
@@ -1453,6 +1463,158 @@ func TestGetProjectToolRetriesWithResolvedWorkspaceForDirectIdentifier(t *testin
 	}
 	if requests["/project/fetch/"+projectUUID] != 2 {
 		t.Fatalf("project/fetch/%s calls = %d, want 2", projectUUID, requests["/project/fetch/"+projectUUID])
+	}
+	if requests["/workspace"] != 2 {
+		t.Fatalf("workspace requests = %d, want 2", requests["/workspace"])
+	}
+	if requests["/workspace/fetch/"+workspaceOne] != 1 {
+		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceOne, requests["/workspace/fetch/"+workspaceOne])
+	}
+	if requests["/workspace/fetch/"+workspaceTwo] != 1 {
+		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceTwo, requests["/workspace/fetch/"+workspaceTwo])
+	}
+}
+
+func TestGetProjectLogsToolFallsBackToWorkspaceLookupForProjectName(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceOne := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	workspaceTwo := "6f36dd81-50e9-4ea3-8094-8e0212684a11"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceOne+`"},{"ID":2,"UUID":"`+workspaceTwo+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceOne:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Projects":[{"UUID":"p1","Name":"other-project","ID":1487}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceTwo:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Projects":[{"UUID":"p2","Name":"utopian-office","NameSlug":"utopian-office","ID":1488}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/logs/utopian-office":
+				t.Fatalf("unexpected direct logs request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/logs/p2":
+				if got := r.URL.Query().Get("workspace_uuid"); got != workspaceTwo {
+					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceTwo)
+				}
+				if got := r.URL.Query().Get("limit"); got != "100" {
+					t.Fatalf("limit = %q, want %q", got, "100")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":[{"message":"hello from resolved logs"}]}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getProjectLogsTool(context.Background(), map[string]interface{}{"project_id": "utopian-office", "limit": 100})
+	if err != nil {
+		t.Fatalf("getProjectLogsTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	logs, ok := data["logs"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected logs list, got %v", data["logs"])
+	}
+	if len(logs) != 1 {
+		t.Fatalf("logs len = %d, want %d", len(logs), 1)
+	}
+	if requests["/workspace"] != 1 {
+		t.Fatalf("workspace requests = %d, want 1", requests["/workspace"])
+	}
+	if requests["/workspace/fetch/"+workspaceOne] != 1 {
+		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceOne, requests["/workspace/fetch/"+workspaceOne])
+	}
+	if requests["/workspace/fetch/"+workspaceTwo] != 1 {
+		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceTwo, requests["/workspace/fetch/"+workspaceTwo])
+	}
+	if requests["/project/logs/utopian-office"] != 0 {
+		t.Fatalf("project/logs/utopian-office calls = %d, want 0", requests["/project/logs/utopian-office"])
+	}
+	if requests["/project/logs/p2"] != 1 {
+		t.Fatalf("project/logs/p2 calls = %d, want 1", requests["/project/logs/p2"])
+	}
+}
+
+func TestGetProjectLogsToolRetriesWithResolvedWorkspaceForDirectIdentifier(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceOne := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	workspaceTwo := "6f36dd81-50e9-4ea3-8094-8e0212684a11"
+	projectUUID := "0a427673-a112-47a4-ac2e-90b175fdabff"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceOne+`"},{"ID":2,"UUID":"`+workspaceTwo+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/logs/"+projectUUID:
+				switch got := r.URL.Query().Get("workspace_uuid"); got {
+				case workspaceOne:
+					return jsonHTTPResponse(r, http.StatusBadRequest, `{"message":"invalid resource"}`), nil
+				case workspaceTwo:
+					if limit := r.URL.Query().Get("limit"); limit != "100" {
+						t.Fatalf("limit = %q, want %q", limit, "100")
+					}
+					return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":[{"message":"resolved direct id logs"}]}`), nil
+				default:
+					t.Fatalf("workspace_uuid = %q, want one of %q or %q", got, workspaceOne, workspaceTwo)
+					return nil, nil
+				}
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceOne:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Projects":[{"UUID":"p1","Name":"other-project","ID":1487}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceTwo:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Projects":[{"UUID":"`+projectUUID+`","Name":"utopian-office","ID":1488}]}}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getProjectLogsTool(context.Background(), map[string]interface{}{"project_id": projectUUID, "limit": 100})
+	if err != nil {
+		t.Fatalf("getProjectLogsTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if requests["/project/logs/"+projectUUID] != 2 {
+		t.Fatalf("project/logs/%s calls = %d, want 2", projectUUID, requests["/project/logs/"+projectUUID])
 	}
 	if requests["/workspace"] != 2 {
 		t.Fatalf("workspace requests = %d, want 2", requests["/workspace"])

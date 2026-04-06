@@ -136,11 +136,12 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				Name:        "get_project_logs",
 				Description: "Get logs for a project",
 				InputSchema: objectSchema(map[string]interface{}{
-					"project_id": stringProperty("The project ID or UUID"),
-					"start_time": stringProperty("Optional RFC3339 start time"),
-					"end_time":   stringProperty("Optional RFC3339 end time"),
-					"limit":      integerProperty("Optional maximum number of log entries"),
-					"search":     stringProperty("Optional search text"),
+					"project_id":   stringProperty("The project ID, UUID, name, or slug"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+					"start_time":   stringProperty("Optional RFC3339 start time"),
+					"end_time":     stringProperty("Optional RFC3339 end time"),
+					"limit":        integerProperty("Optional maximum number of log entries"),
+					"search":       stringProperty("Optional search text"),
 				}, "project_id"),
 			},
 			handler: s.getProjectLogsTool,
@@ -1218,11 +1219,12 @@ type updateProjectArgs struct {
 }
 
 type projectLogsArgs struct {
-	ProjectID string `json:"project_id"`
-	StartTime string `json:"start_time,omitempty"`
-	EndTime   string `json:"end_time,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
-	Search    string `json:"search,omitempty"`
+	ProjectID   string `json:"project_id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	StartTime   string `json:"start_time,omitempty"`
+	EndTime     string `json:"end_time,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+	Search      string `json:"search,omitempty"`
 }
 
 type projectEnvVariablesArgs struct {
@@ -2269,8 +2271,8 @@ func envelopeStatus(status string, success bool) string {
 }
 
 func isWorkspaceProjectsFallbackError(err error) bool {
-	apiErr, ok := err.(*pipeops.ErrorResponse)
-	if !ok || apiErr.Response == nil {
+	var apiErr *pipeops.ErrorResponse
+	if !errors.As(err, &apiErr) || apiErr.Response == nil {
 		return false
 	}
 	switch apiErr.Response.StatusCode {
@@ -2549,12 +2551,58 @@ func (s *Server) getProjectLogsTool(ctx context.Context, args map[string]interfa
 		return nil, fmt.Errorf("project_id is required")
 	}
 
-	resp, _, err := s.client.Projects.GetLogs(ctx, request.ProjectID, &pipeops.LogsOptions{
-		StartTime: request.StartTime,
-		EndTime:   request.EndTime,
-		Limit:     request.Limit,
-		Search:    request.Search,
-	})
+	buildLogsOptions := func(workspaceUUID string) *pipeops.LogsOptions {
+		return &pipeops.LogsOptions{
+			WorkspaceUUID: workspaceUUID,
+			StartTime:     request.StartTime,
+			EndTime:       request.EndTime,
+			Limit:         request.Limit,
+			Search:        request.Search,
+		}
+	}
+
+	workspaceUUID := ""
+	if request.WorkspaceID != "" {
+		workspace, err := s.resolveWorkspaceReference(ctx, request.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		workspaceUUID = projectWorkspaceUUID(nil, workspace)
+	}
+
+	var directErr error
+	if isLikelyDirectProjectIdentifier(request.ProjectID) {
+		resp, _, err := s.client.Projects.GetLogs(ctx, request.ProjectID, buildLogsOptions(workspaceUUID))
+		if err == nil {
+			return jsonResult(resp)
+		}
+		if !isWorkspaceProjectsFallbackError(err) {
+			return nil, err
+		}
+		directErr = err
+	}
+
+	workspace, project, err := s.findProjectReference(ctx, request.ProjectID, request.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	if project == nil {
+		if directErr != nil {
+			return nil, directErr
+		}
+		return nil, fmt.Errorf("project %q not found", request.ProjectID)
+	}
+
+	resolvedProjectID := projectIdentity(project)
+	if resolvedProjectID == "" {
+		if directErr != nil {
+			return nil, directErr
+		}
+		return nil, fmt.Errorf("project %q not found", request.ProjectID)
+	}
+	resolvedWorkspaceUUID := projectWorkspaceUUID(project, workspace)
+
+	resp, _, err := s.client.Projects.GetLogs(ctx, resolvedProjectID, buildLogsOptions(resolvedWorkspaceUUID))
 	if err != nil {
 		return nil, err
 	}
