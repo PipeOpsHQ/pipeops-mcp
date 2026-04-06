@@ -2242,6 +2242,19 @@ func isBillingWorkspaceRequiredError(err error) bool {
 	return strings.Contains(message, "workspace")
 }
 
+func appendUniqueString(values []string, value string) []string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return values
+	}
+	for _, existing := range values {
+		if existing == trimmed {
+			return values
+		}
+	}
+	return append(values, trimmed)
+}
+
 func (s *Server) getProjectTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	var req getProjectArgs
 	if err := decodeArguments(args, &req); err != nil {
@@ -2750,34 +2763,100 @@ func (s *Server) getClusterCostAllocationTool(ctx context.Context, args map[stri
 	}
 	workspaceID, _ := args["workspace_id"].(string)
 
-	workspace, cluster, err := s.findClusterReference(ctx, clusterID, workspaceID)
-	if err != nil {
-		return nil, err
-	}
-	if cluster == nil && workspaceID == "" {
-		return nil, fmt.Errorf("cluster %q not found", clusterID)
-	}
-
 	resolvedClusterID := clusterID
-	if clusterIdentityValue := clusterIdentity(cluster); clusterIdentityValue != "" {
-		resolvedClusterID = clusterIdentityValue
-	}
-	resolvedWorkspaceUUID := clusterWorkspaceUUID(cluster, workspace)
-	if resolvedWorkspaceUUID == "" && workspaceID != "" {
-		resolvedWorkspaceUUID, err = s.resolveDefaultWorkspaceUUID(ctx, map[string]interface{}{"workspace_id": workspaceID})
-		if err != nil {
-			return nil, err
+	candidateWorkspaceUUIDs := make([]string, 0, 2)
+	attemptedWorkspaceUUIDs := make(map[string]struct{})
+	var discoveryErr error
+	path := fmt.Sprintf("cluster/%s/cost/allocation/compute", resolvedClusterID)
+
+	if workspaceID != "" {
+		resolvedWorkspaceUUID, resolveErr := s.resolveDefaultWorkspaceUUID(ctx, map[string]interface{}{"workspace_id": workspaceID})
+		if resolveErr != nil {
+			if discoveryErr == nil {
+				discoveryErr = resolveErr
+			}
+			if isLikelyUUID(workspaceID) {
+				candidateWorkspaceUUIDs = appendUniqueString(candidateWorkspaceUUIDs, workspaceID)
+			}
+		} else {
+			candidateWorkspaceUUIDs = appendUniqueString(candidateWorkspaceUUIDs, resolvedWorkspaceUUID)
 		}
 	}
-	if resolvedWorkspaceUUID == "" {
-		return nil, fmt.Errorf("workspace not found for cluster %q", clusterID)
+
+	workspace, cluster, err := s.findClusterReference(ctx, clusterID, workspaceID)
+	if err != nil {
+		if discoveryErr == nil {
+			discoveryErr = err
+		}
+	} else {
+		if clusterIdentityValue := clusterIdentity(cluster); clusterIdentityValue != "" {
+			resolvedClusterID = clusterIdentityValue
+			path = fmt.Sprintf("cluster/%s/cost/allocation/compute", resolvedClusterID)
+		}
+		candidateWorkspaceUUIDs = appendUniqueString(candidateWorkspaceUUIDs, clusterWorkspaceUUID(cluster, workspace))
 	}
 
-	resp, err := s.requestJSON(ctx, http.MethodGet, withWorkspaceUUIDQuery(fmt.Sprintf("cluster/%s/cost/allocation/compute", resolvedClusterID), resolvedWorkspaceUUID), nil)
-	if err != nil {
-		return nil, err
+	tryWorkspaceCandidates := func(workspaceUUIDs []string) (interface{}, error) {
+		var lastErr error
+		for _, workspaceUUID := range workspaceUUIDs {
+			workspaceUUID = strings.TrimSpace(workspaceUUID)
+			if workspaceUUID == "" {
+				continue
+			}
+			if _, ok := attemptedWorkspaceUUIDs[workspaceUUID]; ok {
+				continue
+			}
+			attemptedWorkspaceUUIDs[workspaceUUID] = struct{}{}
+
+			resp, requestErr := s.requestJSON(ctx, http.MethodGet, withWorkspaceUUIDQuery(path, workspaceUUID), nil)
+			if requestErr == nil {
+				return jsonResult(resp)
+			}
+			if !isWorkspaceProjectsFallbackError(requestErr) {
+				return nil, requestErr
+			}
+			lastErr = requestErr
+		}
+		return nil, lastErr
 	}
-	return jsonResult(resp)
+
+	result, err := tryWorkspaceCandidates(candidateWorkspaceUUIDs)
+	if err == nil && result != nil {
+		return result, nil
+	}
+	lastErr := err
+
+	if len(attemptedWorkspaceUUIDs) == 0 || lastErr != nil {
+		workspaces, _, _, listErr := s.listWorkspaceReferences(ctx)
+		if listErr != nil {
+			if discoveryErr == nil {
+				discoveryErr = listErr
+			}
+		} else {
+			fallbackWorkspaceUUIDs := make([]string, 0, len(workspaces))
+			for _, workspace := range workspaces {
+				fallbackWorkspaceUUIDs = appendUniqueString(fallbackWorkspaceUUIDs, workspace.UUID)
+			}
+			result, err = tryWorkspaceCandidates(fallbackWorkspaceUUIDs)
+			if err == nil && result != nil {
+				return result, nil
+			}
+			if err != nil {
+				lastErr = err
+			}
+		}
+	}
+
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	if discoveryErr != nil {
+		return nil, discoveryErr
+	}
+	if workspaceID == "" {
+		return nil, fmt.Errorf("cluster %q not found", clusterID)
+	}
+	return nil, fmt.Errorf("workspace not found for cluster %q", clusterID)
 }
 
 func (s *Server) listCloudProviderRegionsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {

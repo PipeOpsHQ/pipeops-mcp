@@ -1419,6 +1419,103 @@ func TestGetClusterCostAllocationToolUsesExplicitWorkspaceOverride(t *testing.T)
 	}
 }
 
+func TestGetClusterCostAllocationToolRetriesAcrossWorkspaceCandidates(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceOne := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	workspaceTwo := "6f36dd81-50e9-4ea3-8094-8e0212684a11"
+	clusterUUID := "2bd58e0d-2a20-42cf-a471-d0176905bea3"
+	attemptedWorkspaceUUIDs := make([]string, 0, 2)
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceOne+`"},{"ID":2,"UUID":"`+workspaceTwo+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceOne:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Clusters":[]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceTwo:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Clusters":[]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/cluster/"+clusterUUID+"/cost/allocation/compute":
+				attemptedWorkspaceUUIDs = append(attemptedWorkspaceUUIDs, r.URL.Query().Get("workspace_uuid"))
+				switch got := r.URL.Query().Get("workspace_uuid"); got {
+				case workspaceOne:
+					return jsonHTTPResponse(r, http.StatusBadRequest, `{"message":"invalid workspace"}`), nil
+				case workspaceTwo:
+					return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","message":"ok","data":{"costs":{"total":4.56}}}`), nil
+				default:
+					t.Fatalf("workspace_uuid = %q, want one of %q or %q", got, workspaceOne, workspaceTwo)
+					return nil, nil
+				}
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getClusterCostAllocationTool(context.Background(), map[string]interface{}{"cluster_id": clusterUUID})
+	if err != nil {
+		t.Fatalf("getClusterCostAllocationTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	costs, ok := data["costs"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected costs map, got %v", data["costs"])
+	}
+	if got := costs["total"]; got != 4.56 {
+		t.Fatalf("total = %v, want %v", got, 4.56)
+	}
+	if requests["/workspace"] != 2 {
+		t.Fatalf("workspace requests = %d, want 2", requests["/workspace"])
+	}
+	if requests["/workspace/fetch/"+workspaceOne] != 1 {
+		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceOne, requests["/workspace/fetch/"+workspaceOne])
+	}
+	if requests["/workspace/fetch/"+workspaceTwo] != 1 {
+		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceTwo, requests["/workspace/fetch/"+workspaceTwo])
+	}
+	if requests["/cluster/"+clusterUUID+"/cost/allocation/compute"] != 2 {
+		t.Fatalf("cluster/%s/cost/allocation/compute calls = %d, want 2", clusterUUID, requests["/cluster/"+clusterUUID+"/cost/allocation/compute"])
+	}
+	if len(attemptedWorkspaceUUIDs) != 2 {
+		t.Fatalf("workspace_uuid attempts = %v, want 2 attempts", attemptedWorkspaceUUIDs)
+	}
+	if attemptedWorkspaceUUIDs[0] != workspaceOne {
+		t.Fatalf("first workspace_uuid = %q, want %q", attemptedWorkspaceUUIDs[0], workspaceOne)
+	}
+	if attemptedWorkspaceUUIDs[1] != workspaceTwo {
+		t.Fatalf("second workspace_uuid = %q, want %q", attemptedWorkspaceUUIDs[1], workspaceTwo)
+	}
+}
+
 func TestListEnvironmentsToolAggregatesAcrossWorkspacesUsingWorkspaceFetchIDFallback(t *testing.T) {
 	t.Parallel()
 
