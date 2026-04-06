@@ -219,6 +219,15 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		t.Error("Did not expect list_environments to require project_id")
 	}
 
+	listEnvironmentsProperties, ok := listEnvironments.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected list_environments properties schema")
+	}
+
+	if _, ok := listEnvironmentsProperties["workspace_id"]; !ok {
+		t.Error("Expected list_environments to expose workspace_id filter")
+	}
+
 	createProject := toolByName["create_project"]
 	required, ok := createProject.InputSchema["required"].([]string)
 	if !ok {
@@ -1081,6 +1090,214 @@ func TestListProjectsToolExplicitWorkspaceFallsBackToWorkspaceID(t *testing.T) {
 	}
 	if requests["/workspace/fetch/1"] != 1 {
 		t.Fatalf("workspace/fetch/1 calls = %d, want 1", requests["/workspace/fetch/1"])
+	}
+}
+
+func TestListEnvironmentsToolAggregatesAcrossWorkspacesUsingWorkspaceFetchIDFallback(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"w1"},{"ID":2,"UUID":"w2"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w1":
+				return jsonHTTPResponse(r, http.StatusNotFound, `{"message":"workspace with uuid not found"}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/1":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"w1","Clusters":[{"uuid":"srv1","environments":[{"UUID":"e1","Name":"prod","Namespace":"prod"}]}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w2":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"w2","Clusters":[{"Cluster":{"uuid":"srv2","environments":[{"UUID":"e1","Name":"prod","Namespace":"prod","ClusterUUID":"srv1"},{"UUID":"e2","Name":"beta","Namespace":"beta"}]}}]}}}`), nil
+			case r.URL.Path == "/environment/fetch":
+				t.Fatalf("unexpected legacy environment route: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listEnvironmentsTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listEnvironmentsTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	environments, ok := data["environments"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected environments list, got %v", data["environments"])
+	}
+	if len(environments) != 2 {
+		t.Fatalf("environments len = %d, want %d", len(environments), 2)
+	}
+
+	envByUUID := make(map[string]map[string]interface{}, len(environments))
+	for _, item := range environments {
+		env, ok := item.(map[string]interface{})
+		if !ok {
+			t.Fatalf("expected environment map, got %T", item)
+		}
+		envByUUID[env["UUID"].(string)] = env
+	}
+	if got := envByUUID["e1"]["ClusterUUID"]; got != "srv1" {
+		t.Fatalf("e1 ClusterUUID = %v, want %q", got, "srv1")
+	}
+	if got := envByUUID["e2"]["ClusterUUID"]; got != "srv2" {
+		t.Fatalf("e2 ClusterUUID = %v, want %q", got, "srv2")
+	}
+	if requests["/workspace/fetch/w1"] != 1 {
+		t.Fatalf("workspace/fetch/w1 calls = %d, want 1", requests["/workspace/fetch/w1"])
+	}
+	if requests["/workspace/fetch/1"] != 1 {
+		t.Fatalf("workspace/fetch/1 calls = %d, want 1", requests["/workspace/fetch/1"])
+	}
+	if requests["/workspace/fetch/w2"] != 1 {
+		t.Fatalf("workspace/fetch/w2 calls = %d, want 1", requests["/workspace/fetch/w2"])
+	}
+	if requests["/environment/fetch"] != 0 {
+		t.Fatalf("environment/fetch calls = %d, want 0", requests["/environment/fetch"])
+	}
+}
+
+func TestListEnvironmentsToolSkipsZeroWorkspaceIDFallback(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":0,"UUID":"w1"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w1":
+				return jsonHTTPResponse(r, http.StatusNotFound, `{"message":"workspace with uuid not found"}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/0":
+				t.Fatalf("unexpected zero workspace id fallback request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			case r.URL.Path == "/environment/fetch":
+				t.Fatalf("unexpected legacy environment route: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listEnvironmentsTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listEnvironmentsTool error: %v", err)
+	}
+	resultMap := result.(map[string]interface{})
+	content := resultMap["content"].([]interface{})
+	textContent := content[0].(map[string]interface{})["text"].(string)
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data := payload["data"].(map[string]interface{})
+	environments := data["environments"].([]interface{})
+	if len(environments) != 0 {
+		t.Fatalf("environments len = %d, want %d", len(environments), 0)
+	}
+	if requests["/workspace/fetch/w1"] != 1 {
+		t.Fatalf("workspace/fetch/w1 calls = %d, want 1", requests["/workspace/fetch/w1"])
+	}
+	if requests["/workspace/fetch/0"] != 0 {
+		t.Fatalf("workspace/fetch/0 calls = %d, want 0", requests["/workspace/fetch/0"])
+	}
+	if requests["/environment/fetch"] != 0 {
+		t.Fatalf("environment/fetch calls = %d, want 0", requests["/environment/fetch"])
+	}
+}
+
+func TestListEnvironmentsToolExplicitWorkspaceFallsBackToWorkspaceID(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"workspaces":[{"id":"1","uuid":"w1"}]}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w1":
+				return jsonHTTPResponse(r, http.StatusNotFound, `{"message":"workspace with uuid not found"}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/1":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"w1","environments":[{"UUID":"e1","Name":"prod","Namespace":"prod","ClusterUUID":"srv1"}]}}}`), nil
+			case r.URL.Path == "/environment/fetch":
+				t.Fatalf("unexpected legacy environment route: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listEnvironmentsTool(context.Background(), map[string]interface{}{"workspace_id": "w1"})
+	if err != nil {
+		t.Fatalf("listEnvironmentsTool error: %v", err)
+	}
+	resultMap := result.(map[string]interface{})
+	content := resultMap["content"].([]interface{})
+	textContent := content[0].(map[string]interface{})["text"].(string)
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data := payload["data"].(map[string]interface{})
+	environments := data["environments"].([]interface{})
+	if len(environments) != 1 {
+		t.Fatalf("environments len = %d, want %d", len(environments), 1)
+	}
+	if requests["/workspace/fetch/w1"] != 1 {
+		t.Fatalf("workspace/fetch/w1 calls = %d, want 1", requests["/workspace/fetch/w1"])
+	}
+	if requests["/workspace/fetch/1"] != 1 {
+		t.Fatalf("workspace/fetch/1 calls = %d, want 1", requests["/workspace/fetch/1"])
+	}
+	if requests["/environment/fetch"] != 0 {
+		t.Fatalf("environment/fetch calls = %d, want 0", requests["/environment/fetch"])
 	}
 }
 

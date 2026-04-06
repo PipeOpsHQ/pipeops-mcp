@@ -379,7 +379,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			tool: Tool{
 				Name:        "list_environments",
 				Description: "List all environments",
-				InputSchema: emptySchema(),
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID or UUID filter"),
+				}),
 			},
 			handler: s.listEnvironmentsTool,
 		},
@@ -1131,6 +1133,10 @@ type projectEnvVariablesArgs struct {
 	EnvVariables []pipeops.EnvVariable `json:"env_variables"`
 }
 
+type listEnvironmentsArgs struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
 type updateEnvironmentArgs struct {
 	EnvironmentID string `json:"environment_id"`
 	Name          string `json:"name,omitempty"`
@@ -1532,6 +1538,98 @@ func (s *Server) fetchWorkspaceProjects(ctx context.Context, workspaceID string)
 }
 
 func parseWorkspaceProjects(data json.RawMessage) ([]map[string]interface{}, error) {
+	workspace, err := extractWorkspacePayload(data)
+	if err != nil {
+		return nil, err
+	}
+
+	projects := mapSliceValue(workspace, "projects", "Projects")
+	return projects, nil
+}
+
+func (s *Server) fetchEnvironmentsForWorkspaceReference(ctx context.Context, workspace workspaceReference) ([]map[string]interface{}, string, string, error) {
+	identifiers := workspaceReferenceIdentifiers(workspace)
+	var lastErr error
+	for _, identifier := range identifiers {
+		environments, status, message, err := s.fetchWorkspaceEnvironments(ctx, identifier)
+		if err == nil {
+			return environments, status, message, nil
+		}
+		if !isWorkspaceProjectsFallbackError(err) {
+			return nil, "", "", err
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, "", "", lastErr
+	}
+	return []map[string]interface{}{}, "success", "", nil
+}
+
+func (s *Server) fetchWorkspaceEnvironments(ctx context.Context, workspaceID string) ([]map[string]interface{}, string, string, error) {
+	req, err := s.client.NewRequest(http.MethodGet, fmt.Sprintf("workspace/fetch/%s", workspaceID), nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	var envelope struct {
+		Success bool            `json:"success,omitempty"`
+		Status  string          `json:"status,omitempty"`
+		Message string          `json:"message,omitempty"`
+		Data    json.RawMessage `json:"data,omitempty"`
+	}
+	if _, err := s.client.Do(ctx, req, &envelope); err != nil {
+		return nil, "", "", err
+	}
+
+	environments, err := parseWorkspaceEnvironments(envelope.Data)
+	if err != nil {
+		return nil, "", "", err
+	}
+	return environments, envelopeStatus(envelope.Status, envelope.Success), envelope.Message, nil
+}
+
+func parseWorkspaceEnvironments(data json.RawMessage) ([]map[string]interface{}, error) {
+	workspace, err := extractWorkspacePayload(data)
+	if err != nil {
+		return nil, err
+	}
+
+	environments := make([]map[string]interface{}, 0)
+	seen := make(map[string]struct{})
+	appendEnvironment := func(environment map[string]interface{}, cluster map[string]interface{}) {
+		normalized := normalizeEnvironment(environment, workspace, cluster)
+		identity := environmentIdentity(normalized)
+		if identity != "" {
+			if _, ok := seen[identity]; ok {
+				return
+			}
+			seen[identity] = struct{}{}
+		}
+		environments = append(environments, normalized)
+	}
+
+	for _, environment := range mapSliceValue(workspace, "environments", "Environments") {
+		appendEnvironment(environment, nil)
+	}
+
+	for _, entry := range mapSliceValue(workspace, "clusters", "Clusters") {
+		cluster := entry
+		if nested, ok := lookupValue(entry, "Cluster", "cluster").(map[string]interface{}); ok {
+			cluster = nested
+		}
+		for _, environment := range mapSliceValue(entry, "environments", "Environments") {
+			appendEnvironment(environment, cluster)
+		}
+		for _, environment := range mapSliceValue(cluster, "environments", "Environments") {
+			appendEnvironment(environment, cluster)
+		}
+	}
+
+	return environments, nil
+}
+
+func extractWorkspacePayload(data json.RawMessage) (map[string]interface{}, error) {
 	var payload map[string]interface{}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return nil, err
@@ -1542,8 +1640,69 @@ func parseWorkspaceProjects(data json.RawMessage) ([]map[string]interface{}, err
 	if !ok {
 		workspace = payload
 	}
-	projects := mapSliceValue(workspace, "projects", "Projects")
-	return projects, nil
+	return workspace, nil
+}
+
+func normalizeEnvironment(environment map[string]interface{}, workspace map[string]interface{}, cluster map[string]interface{}) map[string]interface{} {
+	normalized := make(map[string]interface{}, len(environment)+5)
+	for key, value := range environment {
+		normalized[key] = value
+	}
+	if _, ok := normalized["UUID"]; !ok {
+		if uuid := extractString(lookupValue(environment, "UUID", "uuid", "UID", "uid")); uuid != "" {
+			normalized["UUID"] = uuid
+		}
+	}
+	if _, ok := normalized["ID"]; !ok {
+		if id := extractString(lookupValue(environment, "ID", "id")); id != "" {
+			normalized["ID"] = id
+		}
+	}
+	if _, ok := normalized["Name"]; !ok {
+		if name := extractString(lookupValue(environment, "Name", "name")); name != "" {
+			normalized["Name"] = name
+		}
+	}
+	if _, ok := normalized["Namespace"]; !ok {
+		if namespace := extractString(lookupValue(environment, "Namespace", "namespace")); namespace != "" {
+			normalized["Namespace"] = namespace
+		}
+	}
+	if _, ok := normalized["EnvironmentEnvs"]; !ok {
+		if envs := lookupValue(environment, "EnvironmentEnvs", "environment_envs", "env_variables", "EnvVariables"); envs != nil {
+			normalized["EnvironmentEnvs"] = envs
+		}
+	}
+	if _, ok := normalized["ClusterUUID"]; !ok {
+		if clusterUUID := extractString(lookupValue(environment, "ClusterUUID", "cluster_uuid")); clusterUUID != "" {
+			normalized["ClusterUUID"] = clusterUUID
+		} else if clusterUUID := extractString(lookupValue(cluster, "UUID", "uuid", "ClusterUUID", "cluster_uuid")); clusterUUID != "" {
+			normalized["ClusterUUID"] = clusterUUID
+		}
+	}
+	if _, ok := normalized["WorkspaceID"]; !ok {
+		if workspaceID := extractString(lookupValue(environment, "WorkspaceID", "workspace_id")); workspaceID != "" {
+			normalized["WorkspaceID"] = workspaceID
+		} else if workspaceID := extractString(lookupValue(workspace, "UUID", "uuid", "ID", "id")); workspaceID != "" {
+			normalized["WorkspaceID"] = workspaceID
+		}
+	}
+	return normalized
+}
+
+func environmentIdentity(environment map[string]interface{}) string {
+	for _, key := range []string{"UUID", "uuid", "UID", "uid", "ID", "id"} {
+		if value := extractString(lookupValue(environment, key)); value != "" {
+			return value
+		}
+	}
+	clusterUUID := extractString(lookupValue(environment, "ClusterUUID", "cluster_uuid"))
+	namespace := extractString(lookupValue(environment, "Namespace", "namespace"))
+	name := extractString(lookupValue(environment, "Name", "name"))
+	if clusterUUID != "" || namespace != "" || name != "" {
+		return strings.Join([]string{clusterUUID, namespace, name}, "|")
+	}
+	return ""
 }
 
 func workspaceReferenceIdentifiers(workspace workspaceReference) []string {
@@ -2226,12 +2385,99 @@ func (s *Server) listCloudProviderServerTemplatesTool(ctx context.Context, args 
 	return jsonResult(resp)
 }
 
-func (s *Server) listEnvironmentsTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.Environments.List(ctx)
+func (s *Server) listEnvironmentsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req listEnvironmentsArgs
+	if len(args) > 0 {
+		if err := decodeArguments(args, &req); err != nil {
+			return nil, err
+		}
+	}
+
+	var (
+		resp map[string]interface{}
+		err  error
+	)
+	if req.WorkspaceID != "" {
+		resp, err = s.listEnvironmentsForWorkspace(ctx, req.WorkspaceID)
+	} else {
+		resp, err = s.listEnvironmentsAcrossWorkspaces(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return jsonResult(resp)
+}
+
+func (s *Server) listEnvironmentsAcrossWorkspaces(ctx context.Context) (map[string]interface{}, error) {
+	workspaces, status, message, err := s.listWorkspaceReferences(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	environments := make([]map[string]interface{}, 0)
+	seen := make(map[string]struct{})
+	for _, workspace := range workspaces {
+		workspaceEnvironments, workspaceStatus, workspaceMessage, workspaceErr := s.fetchEnvironmentsForWorkspaceReference(ctx, workspace)
+		if workspaceErr != nil {
+			if isWorkspaceProjectsFallbackError(workspaceErr) {
+				continue
+			}
+			return nil, workspaceErr
+		}
+		if status == "" {
+			status = workspaceStatus
+		}
+		if message == "" {
+			message = workspaceMessage
+		}
+		for _, environment := range workspaceEnvironments {
+			environmentKey := environmentIdentity(environment)
+			if environmentKey != "" {
+				if _, ok := seen[environmentKey]; ok {
+					continue
+				}
+				seen[environmentKey] = struct{}{}
+			}
+			environments = append(environments, environment)
+		}
+	}
+
+	return map[string]interface{}{
+		"status":  responseStatus(status),
+		"message": message,
+		"data": map[string]interface{}{
+			"environments": environments,
+		},
+	}, nil
+}
+
+func (s *Server) listEnvironmentsForWorkspace(ctx context.Context, workspaceID string) (map[string]interface{}, error) {
+	workspaceRef, err := s.resolveWorkspaceReference(ctx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	environments, status, message, err := s.fetchEnvironmentsForWorkspaceReference(ctx, workspaceRef)
+	if err != nil {
+		if isWorkspaceProjectsFallbackError(err) {
+			return map[string]interface{}{
+				"status":  "success",
+				"message": err.Error(),
+				"data": map[string]interface{}{
+					"environments": []map[string]interface{}{},
+				},
+			}, nil
+		}
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"status":  responseStatus(status),
+		"message": message,
+		"data": map[string]interface{}{
+			"environments": environments,
+		},
+	}, nil
 }
 
 func (s *Server) getEnvironmentTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
