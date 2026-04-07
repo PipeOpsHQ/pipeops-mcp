@@ -169,6 +169,78 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
+				Name:        "list_vcs_organizations",
+				Description: "List linked VCS organizations or personal profiles for a provider",
+				InputSchema: objectSchema(map[string]interface{}{
+					"provider": stringProperty("The VCS provider: github, gitlab, bitbucket, or azuredevops"),
+				}, "provider"),
+			},
+			handler: s.listVCSOrganizationsTool,
+		},
+		{
+			tool: Tool{
+				Name:        "list_vcs_repositories",
+				Description: "List repositories for a VCS organization or personal profile",
+				InputSchema: objectSchema(map[string]interface{}{
+					"provider": stringProperty("The VCS provider: github, gitlab, bitbucket, or azuredevops"),
+					"org_name": stringProperty("The organization or personal profile name"),
+					"page":     integerProperty("Optional page number"),
+				}, "provider", "org_name"),
+			},
+			handler: s.listVCSRepositoriesTool,
+		},
+		{
+			tool: Tool{
+				Name:        "search_vcs_repositories",
+				Description: "Search repositories within a VCS organization or personal profile",
+				InputSchema: objectSchema(map[string]interface{}{
+					"provider":        stringProperty("The VCS provider: github, gitlab, bitbucket, or azuredevops"),
+					"org_name":        stringProperty("The organization or personal profile name"),
+					"repository_name": stringProperty("The repository name to search for"),
+					"page":            integerProperty("Optional page number"),
+				}, "provider", "org_name", "repository_name"),
+			},
+			handler: s.searchVCSRepositoriesTool,
+		},
+		{
+			tool: Tool{
+				Name:        "list_vcs_branches",
+				Description: "List branches for a repository in a VCS provider",
+				InputSchema: objectSchema(map[string]interface{}{
+					"provider":      stringProperty("The VCS provider: github, gitlab, bitbucket, or azuredevops"),
+					"repo_fullname": stringProperty("Repository full name such as owner/repository"),
+					"visibility":    stringProperty("Optional repository visibility, such as public or private"),
+					"search":        stringProperty("Optional branch name search text"),
+				}, "provider", "repo_fullname"),
+			},
+			handler: s.listVCSBranchesTool,
+		},
+		{
+			tool: Tool{
+				Name:        "check_repository_dockerfile",
+				Description: "Check whether a repository branch contains a Dockerfile",
+				InputSchema: objectSchema(map[string]interface{}{
+					"provider":   stringProperty("The VCS provider: github, gitlab, bitbucket, or azuredevops"),
+					"owner":      stringProperty("The repository owner, namespace, or workspace"),
+					"repository": stringProperty("The repository name"),
+					"branch":     stringProperty("The branch name"),
+				}, "provider", "owner", "repository", "branch"),
+			},
+			handler: s.checkRepositoryDockerfileTool,
+		},
+		{
+			tool: Tool{
+				Name:        "link_vcs_provider",
+				Description: "Initiate VCS provider linking and return the authorization URL",
+				InputSchema: objectSchema(map[string]interface{}{
+					"provider":      stringProperty("The VCS provider: github, gitlab, bitbucket, or azuredevops"),
+					"redirect_path": stringProperty("Frontend redirect path to continue the provider auth flow"),
+				}, "provider", "redirect_path"),
+			},
+			handler: s.linkVCSProviderTool,
+		},
+		{
+			tool: Tool{
 				Name:        "deploy_project_from_image",
 				Description: "Create and deploy a project from a pre-built container image",
 				InputSchema: objectSchema(map[string]interface{}{
@@ -608,10 +680,32 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "list_addons",
-				Description: "List all available add-ons",
-				InputSchema: emptySchema(),
+				Description: "List available add-ons with optional search and filters",
+				InputSchema: objectSchema(map[string]interface{}{
+					"page":         integerProperty("Optional page number"),
+					"limit":        integerProperty("Optional page size"),
+					"category":     stringProperty("Optional add-on category filter"),
+					"search":       stringProperty("Optional add-on search text"),
+					"featured":     booleanProperty("Optional featured add-on filter"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID to scope results"),
+				}),
 			},
 			handler: s.listAddOnsTool,
+		},
+		{
+			tool: Tool{
+				Name:        "search_addons",
+				Description: "Search available add-ons",
+				InputSchema: objectSchema(map[string]interface{}{
+					"search":       stringProperty("The add-on search text"),
+					"page":         integerProperty("Optional page number"),
+					"limit":        integerProperty("Optional page size"),
+					"category":     stringProperty("Optional add-on category filter"),
+					"featured":     booleanProperty("Optional featured add-on filter"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID to scope results"),
+				}, "search"),
+			},
+			handler: s.searchAddOnsTool,
 		},
 		{
 			tool: Tool{
@@ -1023,6 +1117,20 @@ func requiredString(args map[string]interface{}, key string) (string, error) {
 	return value, nil
 }
 
+func normalizeVCSProvider(provider string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(provider))
+	switch normalized {
+	case "github", "gitlab", "bitbucket":
+		return normalized, nil
+	case "azuredevops", "azure-devops", "azure_devops":
+		return "azuredevops", nil
+	case "":
+		return "", fmt.Errorf("provider is required")
+	default:
+		return "", fmt.Errorf("unsupported provider %q", provider)
+	}
+}
+
 func (s *Server) resolveWorkspaceID(ctx context.Context, args map[string]interface{}) (string, error) {
 	if workspaceID, ok := args["workspace_id"].(string); ok && workspaceID != "" {
 		return workspaceID, nil
@@ -1373,6 +1481,51 @@ type addOnDeploymentSessionArgs struct {
 type addOnDomainArgs struct {
 	AddOnID string `json:"addon_id"`
 	Domain  string `json:"domain"`
+}
+
+type listAddOnsArgs struct {
+	Page        int    `json:"page,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+	Category    string `json:"category,omitempty"`
+	Search      string `json:"search,omitempty"`
+	Featured    *bool  `json:"featured,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type vcsProviderArgs struct {
+	Provider string `json:"provider"`
+}
+
+type vcsRepositoriesArgs struct {
+	Provider string `json:"provider"`
+	OrgName  string `json:"org_name"`
+	Page     int    `json:"page,omitempty"`
+}
+
+type vcsRepoSearchArgs struct {
+	Provider       string `json:"provider"`
+	OrgName        string `json:"org_name"`
+	RepositoryName string `json:"repository_name"`
+	Page           int    `json:"page,omitempty"`
+}
+
+type vcsBranchesArgs struct {
+	Provider     string `json:"provider"`
+	RepoFullname string `json:"repo_fullname"`
+	Visibility   string `json:"visibility,omitempty"`
+	Search       string `json:"search,omitempty"`
+}
+
+type vcsDockerfileArgs struct {
+	Provider   string `json:"provider"`
+	Owner      string `json:"owner"`
+	Repository string `json:"repository"`
+	Branch     string `json:"branch"`
+}
+
+type linkVCSProviderArgs struct {
+	Provider     string `json:"provider"`
+	RedirectPath string `json:"redirect_path"`
 }
 
 type planIDArgs struct {
@@ -2956,6 +3109,169 @@ func (s *Server) updateProjectEnvVariablesTool(ctx context.Context, args map[str
 	return jsonResult(resp)
 }
 
+func (s *Server) listVCSOrganizationsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req vcsProviderArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+
+	provider, err := normalizeVCSProvider(req.Provider)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.requestJSON(ctx, http.MethodGet, fmt.Sprintf("project/%s/organisations", provider), nil)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) listVCSRepositoriesTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req vcsRepositoriesArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	provider, err := normalizeVCSProvider(req.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.OrgName) == "" {
+		return nil, fmt.Errorf("org_name is required")
+	}
+
+	path := fmt.Sprintf("project/%s/organisations/repos", provider)
+	if req.Page > 0 {
+		path = withQueryValues(path, map[string]string{"page": fmt.Sprintf("%d", req.Page)})
+	}
+
+	resp, err := s.requestJSON(ctx, http.MethodPost, path, map[string]interface{}{
+		"org_name": strings.TrimSpace(req.OrgName),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) searchVCSRepositoriesTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req vcsRepoSearchArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	provider, err := normalizeVCSProvider(req.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.OrgName) == "" {
+		return nil, fmt.Errorf("org_name is required")
+	}
+	if strings.TrimSpace(req.RepositoryName) == "" {
+		return nil, fmt.Errorf("repository_name is required")
+	}
+
+	path := fmt.Sprintf("project/%s/repo-search", provider)
+	if req.Page > 0 {
+		path = withQueryValues(path, map[string]string{"page": fmt.Sprintf("%d", req.Page)})
+	}
+
+	resp, err := s.requestJSON(ctx, http.MethodPost, path, map[string]interface{}{
+		"org_name":        strings.TrimSpace(req.OrgName),
+		"repository_name": strings.TrimSpace(req.RepositoryName),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) listVCSBranchesTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req vcsBranchesArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	provider, err := normalizeVCSProvider(req.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.RepoFullname) == "" {
+		return nil, fmt.Errorf("repo_fullname is required")
+	}
+
+	path := fmt.Sprintf("project/%s/branches", provider)
+	if strings.TrimSpace(req.Search) != "" {
+		path = withQueryValues(path, map[string]string{"search": strings.TrimSpace(req.Search)})
+	}
+
+	body := map[string]interface{}{
+		"repo_fullname": strings.TrimSpace(req.RepoFullname),
+	}
+	if strings.TrimSpace(req.Visibility) != "" {
+		body["visibility"] = strings.TrimSpace(req.Visibility)
+	}
+
+	resp, err := s.requestJSON(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) checkRepositoryDockerfileTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req vcsDockerfileArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	provider, err := normalizeVCSProvider(req.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.Owner) == "" {
+		return nil, fmt.Errorf("owner is required")
+	}
+	if strings.TrimSpace(req.Repository) == "" {
+		return nil, fmt.Errorf("repository is required")
+	}
+	if strings.TrimSpace(req.Branch) == "" {
+		return nil, fmt.Errorf("branch is required")
+	}
+
+	path := fmt.Sprintf(
+		"project/check-dockerfile/%s/%s/%s/%s",
+		provider,
+		url.PathEscape(strings.TrimSpace(req.Owner)),
+		url.PathEscape(strings.TrimSpace(req.Repository)),
+		url.PathEscape(strings.TrimSpace(req.Branch)),
+	)
+	resp, err := s.requestJSON(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) linkVCSProviderTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req linkVCSProviderArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	provider, err := normalizeVCSProvider(req.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.RedirectPath) == "" {
+		return nil, fmt.Errorf("redirect_path is required")
+	}
+
+	resp, err := s.requestJSON(ctx, http.MethodPost, fmt.Sprintf("project/link/%s", provider), map[string]interface{}{
+		"redirectPath": strings.TrimSpace(req.RedirectPath),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
 func (s *Server) createExternalRegistryTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	var req createExternalRegistryArgs
 	if err := decodeArguments(args, &req); err != nil {
@@ -3925,12 +4241,55 @@ func (s *Server) getCurrentUserTool(ctx context.Context, _ map[string]interface{
 	return jsonResult(resp)
 }
 
-func (s *Server) listAddOnsTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.AddOns.List(ctx)
+func (s *Server) listAddOnsResponse(ctx context.Context, req listAddOnsArgs) (interface{}, error) {
+	values := map[string]string{}
+	if req.Page > 0 {
+		values["page"] = fmt.Sprintf("%d", req.Page)
+	}
+	if req.Limit > 0 {
+		values["limit"] = fmt.Sprintf("%d", req.Limit)
+	}
+	if strings.TrimSpace(req.Category) != "" {
+		values["category"] = strings.TrimSpace(req.Category)
+	}
+	if strings.TrimSpace(req.Search) != "" {
+		values["s"] = strings.TrimSpace(req.Search)
+	}
+	if req.Featured != nil {
+		values["featured"] = fmt.Sprintf("%t", *req.Featured)
+	}
+	if strings.TrimSpace(req.WorkspaceID) != "" {
+		workspaceUUID, err := s.resolveWorkspaceUUID(ctx, req.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+		values["workspace"] = workspaceUUID
+	}
+
+	resp, err := s.requestJSON(ctx, http.MethodGet, withQueryValues("addons", values), nil)
 	if err != nil {
 		return nil, err
 	}
 	return jsonResult(resp)
+}
+
+func (s *Server) listAddOnsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req listAddOnsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	return s.listAddOnsResponse(ctx, req)
+}
+
+func (s *Server) searchAddOnsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req listAddOnsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.Search) == "" {
+		return nil, fmt.Errorf("search is required")
+	}
+	return s.listAddOnsResponse(ctx, req)
 }
 
 func (s *Server) getAddOnTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
