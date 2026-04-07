@@ -1694,6 +1694,62 @@ func parseWorkspaceProjects(data json.RawMessage) ([]map[string]interface{}, err
 	return projects, nil
 }
 
+func parseProjectNameReferences(data json.RawMessage) ([]map[string]interface{}, error) {
+	if len(data) == 0 || strings.TrimSpace(string(data)) == "" || string(data) == "null" {
+		return []map[string]interface{}{}, nil
+	}
+
+	projects, err := asMapSlice(data)
+	if err == nil {
+		return projects, nil
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+
+	projects = mapSliceValue(payload, "projects", "Projects")
+	if len(projects) > 0 {
+		return projects, nil
+	}
+
+	nested, ok := lookupValue(payload, "projects", "Projects").(map[string]interface{})
+	if !ok {
+		return []map[string]interface{}{}, nil
+	}
+	return mapSliceValue(nested, "rows", "Rows"), nil
+}
+
+func (s *Server) fetchProjectNameReferences(ctx context.Context) ([]map[string]interface{}, string, string, error) {
+	req, err := s.client.NewRequest(http.MethodGet, "project/fetch-names", nil)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	var envelope struct {
+		Success bool            `json:"success,omitempty"`
+		Status  string          `json:"status,omitempty"`
+		Message string          `json:"message,omitempty"`
+		Data    json.RawMessage `json:"data,omitempty"`
+	}
+	if _, err := s.client.Do(ctx, req, &envelope); err != nil {
+		return nil, "", "", err
+	}
+
+	projects, err := parseProjectNameReferences(envelope.Data)
+	if err != nil {
+		return nil, "", "", err
+	}
+
+	normalized := make([]map[string]interface{}, 0, len(projects))
+	for _, project := range projects {
+		normalized = append(normalized, normalizeProject(project))
+	}
+
+	return normalized, envelopeStatus(envelope.Status, envelope.Success), envelope.Message, nil
+}
+
 func (s *Server) fetchEnvironmentsForWorkspaceReference(ctx context.Context, workspace workspaceReference) ([]map[string]interface{}, string, string, error) {
 	identifiers := workspaceReferenceIdentifiers(workspace)
 	var lastErr error
@@ -1932,8 +1988,9 @@ func projectMatchesIdentifier(project map[string]interface{}, identifier string)
 
 func projectWorkspaceUUID(project map[string]interface{}, workspace workspaceReference) string {
 	for _, candidate := range []string{
-		extractString(lookupValue(project, "WorkspaceUUID", "workspace_uuid")),
 		workspace.UUID,
+		workspace.ID,
+		extractString(lookupValue(project, "WorkspaceUUID", "workspace_uuid")),
 		extractString(lookupValue(project, "WorkspaceID", "workspace_id")),
 	} {
 		if isUsableWorkspaceIdentifier(candidate) {
@@ -1941,6 +1998,31 @@ func projectWorkspaceUUID(project map[string]interface{}, workspace workspaceRef
 		}
 	}
 	return ""
+}
+
+func (s *Server) resolveProjectReferenceWorkspace(ctx context.Context, project map[string]interface{}, workspaces []workspaceReference) (workspaceReference, error) {
+	projectID := projectIdentity(project)
+	if projectID == "" {
+		return workspaceReference{}, nil
+	}
+
+	for _, workspace := range workspaces {
+		workspaceUUID := projectWorkspaceUUID(project, workspace)
+		if workspaceUUID == "" {
+			continue
+		}
+
+		_, _, err := s.client.Projects.Get(ctx, projectID, &pipeops.ProjectGetOptions{WorkspaceUUID: workspaceUUID})
+		if err == nil {
+			return workspace, nil
+		}
+		if isWorkspaceProjectsFallbackError(err) {
+			continue
+		}
+		return workspaceReference{}, err
+	}
+
+	return workspaceReference{}, nil
 }
 
 func isLikelyDirectProjectIdentifier(value string) bool {
@@ -1990,6 +2072,29 @@ func (s *Server) findProjectReference(ctx context.Context, projectID, workspaceI
 				return workspace, normalizeProject(project), nil
 			}
 		}
+	}
+
+	projectRefs, _, _, err := s.fetchProjectNameReferences(ctx)
+	if err != nil {
+		if isWorkspaceProjectsFallbackError(err) {
+			return workspaceReference{}, nil, nil
+		}
+		return workspaceReference{}, nil, err
+	}
+
+	for _, project := range projectRefs {
+		if !projectMatchesIdentifier(project, projectID) {
+			continue
+		}
+
+		workspace, resolveErr := s.resolveProjectReferenceWorkspace(ctx, project, workspaces)
+		if resolveErr != nil {
+			return workspaceReference{}, nil, resolveErr
+		}
+		if workspace.UUID == "" && workspace.ID == "" {
+			continue
+		}
+		return workspace, normalizeProject(project), nil
 	}
 
 	return workspaceReference{}, nil, nil
