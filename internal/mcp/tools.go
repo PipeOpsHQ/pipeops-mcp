@@ -298,8 +298,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 						"value": integerProperty("Memory amount"),
 						"unit":  stringProperty("Memory unit such as MB or GB"),
 					}, "value", "unit"),
-					"server_id":      stringProperty("The target server or cluster ID or UUID"),
-					"cluster_id":     stringProperty("Optional alias for server_id using cluster terminology"),
+					"server_id":      stringProperty("The target server ID or UUID"),
 					"environment_id": stringProperty("The environment ID for the project"),
 					"workspace_id":   stringProperty("The workspace ID that owns the deployment"),
 					"preset":         stringProperty("Optional resource preset name"),
@@ -430,27 +429,25 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
-				Name:        "get_cluster_connection",
-				Description: "Get connection information for a cluster",
+				Name:        "get_server_connection",
+				Description: "Get connection information for a server",
 				InputSchema: objectSchema(map[string]interface{}{
-					"cluster_id": stringProperty("The cluster ID or UUID"),
-					"server_id":  stringProperty("Optional alias for cluster_id using existing server terminology"),
-				}, "cluster_id"),
+					"server_id": stringProperty("The server ID or UUID"),
+				}, "server_id"),
 			},
 			handler: s.getClusterConnectionTool,
 		},
 		{
 			tool: Tool{
-				Name:        "get_cluster_cost_allocation",
-				Description: "Get compute cost allocation for a cluster",
+				Name:        "get_server_cost_allocation",
+				Description: "Get compute cost allocation for a server",
 				InputSchema: objectSchema(map[string]interface{}{
-					"cluster_id":   stringProperty("The cluster ID or UUID"),
-					"server_id":    stringProperty("Optional alias for cluster_id using existing server terminology"),
+					"server_id":    stringProperty("The server ID or UUID"),
 					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
 					"aggregate":    stringProperty("Optional cost aggregation, defaults to namespace"),
 					"window":       stringProperty("Optional time window such as 30d, defaults to 30d"),
 					"location":     stringProperty("Optional billing location such as NGR or USA, used for nova server cost fallback"),
-				}, "cluster_id"),
+				}, "server_id"),
 			},
 			handler: s.getClusterCostAllocationTool,
 		},
@@ -1048,12 +1045,24 @@ func (s *Server) handleToolsList() interface{} {
 }
 
 // handleToolsCall handles a tool invocation.
+func normalizeLegacyToolName(name string) string {
+	switch name {
+	case "get_cluster_connection":
+		return "get_server_connection"
+	case "get_cluster_cost_allocation":
+		return "get_server_cost_allocation"
+	default:
+		return name
+	}
+}
+
 func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (interface{}, error) {
 	var callParams ToolCallParams
 	if err := json.Unmarshal(params, &callParams); err != nil {
 		return nil, fmt.Errorf("invalid parameters: %w", err)
 	}
 
+	callParams.Name = normalizeLegacyToolName(callParams.Name)
 	if callParams.Arguments == nil {
 		callParams.Arguments = map[string]interface{}{}
 	}
@@ -1395,8 +1404,11 @@ func (s *Server) requestProjectLogs(ctx context.Context, projectID string, opts 
 	return normalizeLogsResponse(resp), nil
 }
 
-func buildProjectDeploymentsQueryValues(filterBy string, page, limit int) map[string]string {
+func buildProjectDeploymentsQueryValues(workspaceUUID, filterBy string, page, limit int) map[string]string {
 	values := map[string]string{}
+	if normalizedWorkspaceUUID := strings.TrimSpace(workspaceUUID); normalizedWorkspaceUUID != "" {
+		values["workspace_uuid"] = normalizedWorkspaceUUID
+	}
 	if normalizedFilter := strings.TrimSpace(filterBy); normalizedFilter != "" {
 		values["filterBy"] = normalizedFilter
 	}
@@ -1409,10 +1421,10 @@ func buildProjectDeploymentsQueryValues(filterBy string, page, limit int) map[st
 	return values
 }
 
-func (s *Server) requestProjectDeployments(ctx context.Context, projectID string, filterBy string, page, limit int) (map[string]interface{}, error) {
+func (s *Server) requestProjectDeployments(ctx context.Context, projectID, workspaceUUID string, filterBy string, page, limit int) (map[string]interface{}, error) {
 	path := withQueryValues(
 		fmt.Sprintf("project/get-deployments/%s", url.PathEscape(strings.TrimSpace(projectID))),
-		buildProjectDeploymentsQueryValues(filterBy, page, limit),
+		buildProjectDeploymentsQueryValues(workspaceUUID, filterBy, page, limit),
 	)
 
 	resp, err := s.requestJSON(ctx, http.MethodGet, path, nil)
@@ -1422,10 +1434,10 @@ func (s *Server) requestProjectDeployments(ctx context.Context, projectID string
 	return normalizeCollectionResponse(resp, "deployments"), nil
 }
 
-func (s *Server) requestProjectDeploymentHistory(ctx context.Context, projectID string, page, limit int) (map[string]interface{}, error) {
+func (s *Server) requestProjectDeploymentHistory(ctx context.Context, projectID, workspaceUUID string, page, limit int) (map[string]interface{}, error) {
 	path := withQueryValues(
 		fmt.Sprintf("project/deployment/%s", url.PathEscape(strings.TrimSpace(projectID))),
-		buildProjectDeploymentsQueryValues("", page, limit),
+		buildProjectDeploymentsQueryValues(workspaceUUID, "", page, limit),
 	)
 
 	resp, err := s.requestJSON(ctx, http.MethodGet, path, nil)
@@ -1433,6 +1445,104 @@ func (s *Server) requestProjectDeploymentHistory(ctx context.Context, projectID 
 		return nil, fmt.Errorf("failed to list project deployment history: %w", err)
 	}
 	return normalizeCollectionResponse(resp, "deployments"), nil
+}
+
+func (s *Server) requestProjectDeploymentCollectionWithFallback(ctx context.Context, projectID, workspaceID string, request func(context.Context, string, string) (map[string]interface{}, error)) (map[string]interface{}, map[string]interface{}, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, nil, fmt.Errorf("project_id is required")
+	}
+
+	explicitWorkspaceUUID := ""
+	if strings.TrimSpace(workspaceID) != "" {
+		workspace, err := s.resolveWorkspaceReference(ctx, workspaceID)
+		if err != nil {
+			return nil, nil, err
+		}
+		explicitWorkspaceUUID = projectWorkspaceUUID(nil, workspace)
+	}
+
+	tryRequest := func(projectIdentifiers []string, workspaceUUIDs []string) (map[string]interface{}, error) {
+		if len(workspaceUUIDs) == 0 {
+			workspaceUUIDs = []string{""}
+		}
+
+		attempted := make(map[string]struct{})
+		var lastErr error
+		for _, projectIdentifier := range projectIdentifiers {
+			projectIdentifier = strings.TrimSpace(projectIdentifier)
+			if projectIdentifier == "" {
+				continue
+			}
+			for _, workspaceUUID := range workspaceUUIDs {
+				workspaceUUID = strings.TrimSpace(workspaceUUID)
+				attemptKey := projectIdentifier + "|" + workspaceUUID
+				if _, ok := attempted[attemptKey]; ok {
+					continue
+				}
+				attempted[attemptKey] = struct{}{}
+
+				resp, err := request(ctx, projectIdentifier, workspaceUUID)
+				if err == nil {
+					return resp, nil
+				}
+				if !isProjectDeploymentRetryableError(err) {
+					return nil, err
+				}
+				lastErr = err
+			}
+		}
+		return nil, lastErr
+	}
+
+	var directErr error
+	if isLikelyDirectProjectIdentifier(projectID) {
+		directWorkspaceUUIDs := []string{}
+		if explicitWorkspaceUUID != "" {
+			directWorkspaceUUIDs = appendUniqueString(directWorkspaceUUIDs, explicitWorkspaceUUID)
+		}
+		directWorkspaceUUIDs = append(directWorkspaceUUIDs, "")
+
+		resp, err := tryRequest([]string{projectID}, directWorkspaceUUIDs)
+		if err == nil {
+			return resp, nil, nil
+		}
+		directErr = err
+	}
+
+	workspace, project, err := s.findProjectReference(ctx, projectID, workspaceID)
+	if err != nil {
+		return nil, nil, err
+	}
+	if project == nil {
+		if directErr != nil {
+			return nil, nil, directErr
+		}
+		return nil, nil, fmt.Errorf("project %q not found", projectID)
+	}
+
+	projectIdentifiers := projectLogIdentifiers(project)
+	if len(projectIdentifiers) == 0 {
+		if directErr != nil {
+			return nil, nil, directErr
+		}
+		return nil, nil, fmt.Errorf("project %q not found", projectID)
+	}
+
+	workspaceUUIDs := []string{}
+	if resolvedWorkspaceUUID := projectWorkspaceUUID(project, workspace); resolvedWorkspaceUUID != "" {
+		workspaceUUIDs = appendUniqueString(workspaceUUIDs, resolvedWorkspaceUUID)
+	}
+	if explicitWorkspaceUUID != "" {
+		workspaceUUIDs = appendUniqueString(workspaceUUIDs, explicitWorkspaceUUID)
+	}
+	workspaceUUIDs = append(workspaceUUIDs, "")
+
+	resp, err := tryRequest(projectIdentifiers, workspaceUUIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	return resp, normalizeProject(project), nil
 }
 
 func responseCollectionItems(resp map[string]interface{}, key string) []map[string]interface{} {
@@ -1541,30 +1651,6 @@ func filterDeploymentItems(items []map[string]interface{}, query string) []map[s
 		}
 	}
 	return filtered
-}
-
-func (s *Server) resolveProjectDeploymentTarget(ctx context.Context, projectID, workspaceID string) (string, map[string]interface{}, error) {
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		return "", nil, fmt.Errorf("project_id is required")
-	}
-	if isLikelyDirectProjectIdentifier(projectID) {
-		return projectID, nil, nil
-	}
-
-	_, project, err := s.findProjectReferenceWithFallback(ctx, projectID, workspaceID, true)
-	if err != nil {
-		return "", nil, err
-	}
-	if project == nil {
-		return "", nil, fmt.Errorf("project %q not found", projectID)
-	}
-
-	resolvedProjectID := projectIdentity(project)
-	if resolvedProjectID == "" {
-		return "", nil, fmt.Errorf("project %q not found", projectID)
-	}
-	return resolvedProjectID, normalizeProject(project), nil
 }
 
 func withClusterCostAllocationQuery(path, workspaceUUID, aggregate, window string) string {
@@ -3061,7 +3147,25 @@ func isWorkspaceProjectsFallbackError(err error) bool {
 	}
 }
 
+func isServerFetchFallbackError(err error) bool {
+	if isWorkspaceProjectsFallbackError(err) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(strings.TrimSpace(err.Error())), "no cluster data returned")
+}
+
 func isProjectLogsRetryableError(err error) bool {
+	if isWorkspaceProjectsFallbackError(err) {
+		return true
+	}
+	var apiErr *pipeops.ErrorResponse
+	if !errors.As(err, &apiErr) || apiErr.Response == nil {
+		return false
+	}
+	return apiErr.Response.StatusCode >= http.StatusInternalServerError
+}
+
+func isProjectDeploymentRetryableError(err error) bool {
 	if isWorkspaceProjectsFallbackError(err) {
 		return true
 	}
@@ -3464,12 +3568,10 @@ func (s *Server) listProjectDeploymentsTool(ctx context.Context, args map[string
 	if err := decodeArguments(args, &req); err != nil {
 		return nil, err
 	}
-	resolvedProjectID, project, err := s.resolveProjectDeploymentTarget(ctx, req.ProjectID, req.WorkspaceID)
-	if err != nil {
-		return nil, err
-	}
 
-	resp, err := s.requestProjectDeployments(ctx, resolvedProjectID, req.FilterBy, req.Page, req.Limit)
+	resp, project, err := s.requestProjectDeploymentCollectionWithFallback(ctx, req.ProjectID, req.WorkspaceID, func(ctx context.Context, projectID, workspaceUUID string) (map[string]interface{}, error) {
+		return s.requestProjectDeployments(ctx, projectID, workspaceUUID, req.FilterBy, req.Page, req.Limit)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -3481,12 +3583,10 @@ func (s *Server) listProjectDeploymentHistoryTool(ctx context.Context, args map[
 	if err := decodeArguments(args, &req); err != nil {
 		return nil, err
 	}
-	resolvedProjectID, project, err := s.resolveProjectDeploymentTarget(ctx, req.ProjectID, req.WorkspaceID)
-	if err != nil {
-		return nil, err
-	}
 
-	resp, err := s.requestProjectDeploymentHistory(ctx, resolvedProjectID, req.Page, req.Limit)
+	resp, project, err := s.requestProjectDeploymentCollectionWithFallback(ctx, req.ProjectID, req.WorkspaceID, func(ctx context.Context, projectID, workspaceUUID string) (map[string]interface{}, error) {
+		return s.requestProjectDeploymentHistory(ctx, projectID, workspaceUUID, req.Page, req.Limit)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -3501,12 +3601,10 @@ func (s *Server) searchProjectDeploymentsTool(ctx context.Context, args map[stri
 	if strings.TrimSpace(req.Search) == "" {
 		return nil, fmt.Errorf("search is required")
 	}
-	resolvedProjectID, project, err := s.resolveProjectDeploymentTarget(ctx, req.ProjectID, req.WorkspaceID)
-	if err != nil {
-		return nil, err
-	}
 
-	resp, err := s.requestProjectDeployments(ctx, resolvedProjectID, req.FilterBy, req.Page, req.Limit)
+	resp, project, err := s.requestProjectDeploymentCollectionWithFallback(ctx, req.ProjectID, req.WorkspaceID, func(ctx context.Context, projectID, workspaceUUID string) (map[string]interface{}, error) {
+		return s.requestProjectDeployments(ctx, projectID, workspaceUUID, req.FilterBy, req.Page, req.Limit)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -4001,7 +4099,7 @@ func (s *Server) getServerTool(ctx context.Context, args map[string]interface{})
 		if err == nil {
 			return jsonResult(resp)
 		}
-		if !isWorkspaceProjectsFallbackError(err) {
+		if !isServerFetchFallbackError(err) {
 			return nil, err
 		}
 		directErr = err
@@ -4025,7 +4123,7 @@ func (s *Server) getServerTool(ctx context.Context, args map[string]interface{})
 		if err == nil {
 			return jsonResult(resp)
 		}
-		if !isWorkspaceProjectsFallbackError(err) {
+		if !isServerFetchFallbackError(err) {
 			return nil, err
 		}
 	}
@@ -4040,12 +4138,12 @@ func (s *Server) getServerTool(ctx context.Context, args map[string]interface{})
 }
 
 func (s *Server) getClusterConnectionTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	clusterID, _ := args["cluster_id"].(string)
+	clusterID, _ := args["server_id"].(string)
 	if clusterID == "" {
-		clusterID, _ = args["server_id"].(string)
+		clusterID, _ = args["cluster_id"].(string)
 	}
 	if clusterID == "" {
-		return nil, fmt.Errorf("cluster_id is required")
+		return nil, fmt.Errorf("server_id is required")
 	}
 
 	var directErr error
@@ -4068,7 +4166,7 @@ func (s *Server) getClusterConnectionTool(ctx context.Context, args map[string]i
 		if directErr != nil {
 			return nil, directErr
 		}
-		return nil, fmt.Errorf("cluster %q not found", clusterID)
+		return nil, fmt.Errorf("server %q not found", clusterID)
 	}
 
 	resolvedClusterID := clusterIdentity(cluster)
@@ -4076,7 +4174,7 @@ func (s *Server) getClusterConnectionTool(ctx context.Context, args map[string]i
 		if directErr != nil {
 			return nil, directErr
 		}
-		return nil, fmt.Errorf("cluster %q not found", clusterID)
+		return nil, fmt.Errorf("server %q not found", clusterID)
 	}
 
 	resp, _, err := s.client.Servers.GetClusterConnection(ctx, resolvedClusterID)
@@ -4087,12 +4185,12 @@ func (s *Server) getClusterConnectionTool(ctx context.Context, args map[string]i
 }
 
 func (s *Server) getClusterCostAllocationTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	clusterID, _ := args["cluster_id"].(string)
+	clusterID, _ := args["server_id"].(string)
 	if clusterID == "" {
-		clusterID, _ = args["server_id"].(string)
+		clusterID, _ = args["cluster_id"].(string)
 	}
 	if clusterID == "" {
-		return nil, fmt.Errorf("cluster_id is required")
+		return nil, fmt.Errorf("server_id is required")
 	}
 	workspaceID, _ := args["workspace_id"].(string)
 	aggregate, _ := args["aggregate"].(string)
@@ -4204,9 +4302,9 @@ func (s *Server) getClusterCostAllocationTool(ctx context.Context, args map[stri
 		return nil, discoveryErr
 	}
 	if workspaceID == "" {
-		return nil, fmt.Errorf("cluster %q not found", clusterID)
+		return nil, fmt.Errorf("server %q not found", clusterID)
 	}
-	return nil, fmt.Errorf("workspace not found for cluster %q", clusterID)
+	return nil, fmt.Errorf("workspace not found for server %q", clusterID)
 }
 
 func (s *Server) listCloudProviderRegionsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {

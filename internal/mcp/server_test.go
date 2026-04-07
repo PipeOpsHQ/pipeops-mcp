@@ -84,8 +84,8 @@ func TestHandleToolsList(t *testing.T) {
 		"list_public_registry_tags",
 		"list_servers",
 		"get_server",
-		"get_cluster_connection",
-		"get_cluster_cost_allocation",
+		"get_server_connection",
+		"get_server_cost_allocation",
 		"list_cloud_provider_regions",
 		"list_cloud_provider_instance_categories",
 		"list_cloud_provider_instance_types",
@@ -492,51 +492,60 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		t.Fatalf("Expected revoke_service_account_token to require only token_id, got %v", revokeServiceAccountTokenRequired)
 	}
 
-	getClusterConnection := toolByName["get_cluster_connection"]
-	getClusterConnectionRequired, ok := getClusterConnection.InputSchema["required"].([]string)
+	getServerConnection := toolByName["get_server_connection"]
+	getServerConnectionRequired, ok := getServerConnection.InputSchema["required"].([]string)
 	if !ok {
-		t.Fatal("Expected get_cluster_connection required schema to be []string")
+		t.Fatal("Expected get_server_connection required schema to be []string")
 	}
 
-	if len(getClusterConnectionRequired) != 1 || getClusterConnectionRequired[0] != "cluster_id" {
-		t.Fatalf("Expected get_cluster_connection to require only cluster_id, got %v", getClusterConnectionRequired)
+	if len(getServerConnectionRequired) != 1 || getServerConnectionRequired[0] != "server_id" {
+		t.Fatalf("Expected get_server_connection to require only server_id, got %v", getServerConnectionRequired)
 	}
 
-	getClusterConnectionProperties, ok := getClusterConnection.InputSchema["properties"].(map[string]interface{})
+	getServerConnectionProperties, ok := getServerConnection.InputSchema["properties"].(map[string]interface{})
 	if !ok {
-		t.Fatal("Expected get_cluster_connection properties schema")
+		t.Fatal("Expected get_server_connection properties schema")
 	}
 
-	if _, ok := getClusterConnectionProperties["server_id"]; !ok {
-		t.Error("Expected get_cluster_connection to expose server_id alias")
+	if _, ok := getServerConnectionProperties["server_id"]; !ok {
+		t.Error("Expected get_server_connection to expose server_id")
+	}
+	if _, ok := getServerConnectionProperties["cluster_id"]; ok {
+		t.Error("Did not expect get_server_connection to expose cluster_id")
 	}
 
-	getClusterCostAllocation := toolByName["get_cluster_cost_allocation"]
-	getClusterCostAllocationRequired, ok := getClusterCostAllocation.InputSchema["required"].([]string)
+	getServerCostAllocation := toolByName["get_server_cost_allocation"]
+	getServerCostAllocationRequired, ok := getServerCostAllocation.InputSchema["required"].([]string)
 	if !ok {
-		t.Fatal("Expected get_cluster_cost_allocation required schema to be []string")
+		t.Fatal("Expected get_server_cost_allocation required schema to be []string")
 	}
 
-	if len(getClusterCostAllocationRequired) != 1 || getClusterCostAllocationRequired[0] != "cluster_id" {
-		t.Fatalf("Expected get_cluster_cost_allocation to require only cluster_id, got %v", getClusterCostAllocationRequired)
+	if len(getServerCostAllocationRequired) != 1 || getServerCostAllocationRequired[0] != "server_id" {
+		t.Fatalf("Expected get_server_cost_allocation to require only server_id, got %v", getServerCostAllocationRequired)
 	}
 
-	getClusterCostAllocationProperties, ok := getClusterCostAllocation.InputSchema["properties"].(map[string]interface{})
+	getServerCostAllocationProperties, ok := getServerCostAllocation.InputSchema["properties"].(map[string]interface{})
 	if !ok {
-		t.Fatal("Expected get_cluster_cost_allocation properties schema")
+		t.Fatal("Expected get_server_cost_allocation properties schema")
 	}
 
-	if _, ok := getClusterCostAllocationProperties["workspace_id"]; !ok {
-		t.Error("Expected get_cluster_cost_allocation to expose workspace_id override")
+	if _, ok := getServerCostAllocationProperties["server_id"]; !ok {
+		t.Error("Expected get_server_cost_allocation to expose server_id")
 	}
-	if _, ok := getClusterCostAllocationProperties["aggregate"]; !ok {
-		t.Error("Expected get_cluster_cost_allocation to expose aggregate option")
+	if _, ok := getServerCostAllocationProperties["cluster_id"]; ok {
+		t.Error("Did not expect get_server_cost_allocation to expose cluster_id")
 	}
-	if _, ok := getClusterCostAllocationProperties["window"]; !ok {
-		t.Error("Expected get_cluster_cost_allocation to expose window option")
+	if _, ok := getServerCostAllocationProperties["workspace_id"]; !ok {
+		t.Error("Expected get_server_cost_allocation to expose workspace_id override")
 	}
-	if _, ok := getClusterCostAllocationProperties["location"]; !ok {
-		t.Error("Expected get_cluster_cost_allocation to expose location option")
+	if _, ok := getServerCostAllocationProperties["aggregate"]; !ok {
+		t.Error("Expected get_server_cost_allocation to expose aggregate option")
+	}
+	if _, ok := getServerCostAllocationProperties["window"]; !ok {
+		t.Error("Expected get_server_cost_allocation to expose window option")
+	}
+	if _, ok := getServerCostAllocationProperties["location"]; !ok {
+		t.Error("Expected get_server_cost_allocation to expose location option")
 	}
 
 	deployProjectFromImage := toolByName["deploy_project_from_image"]
@@ -818,22 +827,22 @@ func TestHandleToolsCallValidatesRequiredArguments(t *testing.T) {
 		t.Fatalf("Expected token_id error, got %v", err)
 	}
 
-	_, err = server.handleToolsCall(ctx, []byte(`{"name":"get_cluster_connection","arguments":{}}`))
+	_, err = server.handleToolsCall(ctx, []byte(`{"name":"get_server_connection","arguments":{}}`))
 	if err == nil {
-		t.Fatal("Expected missing cluster_id error for get_cluster_connection")
+		t.Fatal("Expected missing server_id error for get_server_connection")
 	}
 
-	if err.Error() != "cluster_id is required" {
-		t.Fatalf("Expected cluster_id error, got %v", err)
+	if err.Error() != "server_id is required" {
+		t.Fatalf("Expected server_id error, got %v", err)
 	}
 
-	_, err = server.handleToolsCall(ctx, []byte(`{"name":"get_cluster_cost_allocation","arguments":{}}`))
+	_, err = server.handleToolsCall(ctx, []byte(`{"name":"get_server_cost_allocation","arguments":{}}`))
 	if err == nil {
-		t.Fatal("Expected missing cluster_id error for get_cluster_cost_allocation")
+		t.Fatal("Expected missing server_id error for get_server_cost_allocation")
 	}
 
-	if err.Error() != "cluster_id is required" {
-		t.Fatalf("Expected cluster_id error, got %v", err)
+	if err.Error() != "server_id is required" {
+		t.Fatalf("Expected server_id error, got %v", err)
 	}
 
 	_, err = server.handleToolsCall(ctx, []byte(`{"name":"deploy_project_from_image","arguments":{}}`))
@@ -895,6 +904,27 @@ func jsonHTTPResponse(req *http.Request, statusCode int, body string) *http.Resp
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(body)),
 		Request:    req,
+	}
+}
+
+func TestHandleToolsCallSupportsLegacyClusterToolAliases(t *testing.T) {
+	server := &Server{}
+	ctx := context.Background()
+
+	_, err := server.handleToolsCall(ctx, []byte(`{"name":"get_cluster_connection","arguments":{}}`))
+	if err == nil {
+		t.Fatal("Expected missing server_id error for legacy get_cluster_connection alias")
+	}
+	if err.Error() != "server_id is required" {
+		t.Fatalf("Expected server_id error, got %v", err)
+	}
+
+	_, err = server.handleToolsCall(ctx, []byte(`{"name":"get_cluster_cost_allocation","arguments":{}}`))
+	if err == nil {
+		t.Fatal("Expected missing server_id error for legacy get_cluster_cost_allocation alias")
+	}
+	if err.Error() != "server_id is required" {
+		t.Fatalf("Expected server_id error, got %v", err)
 	}
 }
 
@@ -1066,7 +1096,7 @@ func TestGetServerToolFallsBackToWorkspaceLookupForServerSlug(t *testing.T) {
 				if got := r.URL.Query().Get("workspace_uuid"); got != workspaceTwo {
 					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceTwo)
 				}
-				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"clusters":[{"Cluster":{"uuid":"srv2","name":"Faulty Art","cloudProvider":"aws","region":"us-east-1","status":"running"}}]}}`), nil
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"uuid":"srv2","name":"Faulty Art","cloudProvider":"aws","region":"us-east-1","status":"running"}}`), nil
 			case r.Method == http.MethodGet && r.URL.Path == "/cluster/faulty-art":
 				t.Fatalf("unexpected direct server request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
 				return nil, nil
@@ -2361,6 +2391,105 @@ func TestGetProjectLogsToolRetriesWithResolvedWorkspaceForDirectIdentifier(t *te
 	}
 	if requests["/project/logs/"+projectUUID] != 2 {
 		t.Fatalf("project/logs/%s calls = %d, want 2", projectUUID, requests["/project/logs/"+projectUUID])
+	}
+	if requests["/workspace"] != 1 {
+		t.Fatalf("workspace requests = %d, want 1", requests["/workspace"])
+	}
+	if requests["/workspace/fetch/"+workspaceOne] != 1 {
+		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceOne, requests["/workspace/fetch/"+workspaceOne])
+	}
+	if requests["/workspace/fetch/"+workspaceTwo] != 1 {
+		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceTwo, requests["/workspace/fetch/"+workspaceTwo])
+	}
+}
+
+func TestListProjectDeploymentsToolRetriesWithResolvedWorkspaceForDirectIdentifier(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceOne := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	workspaceTwo := "911bceb5-3a2d-4154-93b3-33033dcafbb3"
+	projectUUID := "b7500255-80fc-4ccc-8dff-a6896be2c442"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceOne+`"},{"ID":2,"UUID":"`+workspaceTwo+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/get-deployments/"+projectUUID:
+				if got := r.URL.Query().Get("limit"); got != "1" {
+					t.Fatalf("limit = %q, want %q", got, "1")
+				}
+				switch got := r.URL.Query().Get("workspace_uuid"); got {
+				case "":
+					return jsonHTTPResponse(r, http.StatusBadRequest, `{"message":"invalid workspace"}`), nil
+				case workspaceTwo:
+					return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":[{"UUID":"dep1","Status":"deployed"}],"meta":{"current_page":1,"current_count":1}}`), nil
+				default:
+					t.Fatalf("workspace_uuid = %q, want %q or empty", got, workspaceTwo)
+					return nil, nil
+				}
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceOne:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Projects":[{"UUID":"p1","Name":"other-project","ID":1487}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceTwo:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Projects":[{"UUID":"`+projectUUID+`","Name":"deploy-app","NameSlug":"deploy-app","ID":1488}]}}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listProjectDeploymentsTool(context.Background(), map[string]interface{}{"project_id": projectUUID, "limit": 1})
+	if err != nil {
+		t.Fatalf("listProjectDeploymentsTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	deployments, ok := data["deployments"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected deployments list, got %v", data["deployments"])
+	}
+	if len(deployments) != 1 {
+		t.Fatalf("deployments len = %d, want %d", len(deployments), 1)
+	}
+	project, ok := data["project"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected project map, got %v", data["project"])
+	}
+	if got := project["UUID"]; got != projectUUID {
+		t.Fatalf("UUID = %v, want %q", got, projectUUID)
+	}
+	if got := project["Name"]; got != "deploy-app" {
+		t.Fatalf("Name = %v, want %q", got, "deploy-app")
+	}
+	if requests["/project/get-deployments/"+projectUUID] != 2 {
+		t.Fatalf("project/get-deployments/%s calls = %d, want 2", projectUUID, requests["/project/get-deployments/"+projectUUID])
 	}
 	if requests["/workspace"] != 1 {
 		t.Fatalf("workspace requests = %d, want 1", requests["/workspace"])
