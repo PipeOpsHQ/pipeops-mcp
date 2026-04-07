@@ -3280,6 +3280,49 @@ func TestGetBillingInfoToolUsesExplicitWorkspaceOverride(t *testing.T) {
 	}
 }
 
+func TestListInvoicesToolUsesBillingHistoryRoute(t *testing.T) {
+	t.Parallel()
+
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+			}
+			if r.URL.Path != "/billing/history" {
+				t.Fatalf("path = %s, want %s", r.URL.Path, "/billing/history")
+			}
+			return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"billing history fetched succesfully","data":[{"UID":"inv_1","InvoiceNumber":"PIP-123","Amount":19.99,"Currency":"USD","Status":"paid"}],"meta":{"current_page":1}}`), nil
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listInvoicesTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listInvoicesTool error: %v", err)
+	}
+
+	payload := decodeToolJSONResult(t, result)
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	invoices, ok := data["invoices"].([]interface{})
+	if !ok || len(invoices) != 1 {
+		t.Fatalf("Expected single invoice, got %v", data["invoices"])
+	}
+	invoice, ok := invoices[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected invoice map, got %v", invoices[0])
+	}
+	if got := invoice["InvoiceNumber"]; got != "PIP-123" {
+		t.Fatalf("InvoiceNumber = %v, want %q", got, "PIP-123")
+	}
+}
+
 func TestListSubscriptionsToolNormalizesArrayResponse(t *testing.T) {
 	t.Parallel()
 

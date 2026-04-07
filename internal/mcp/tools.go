@@ -5047,11 +5047,11 @@ func (s *Server) getSubscriptionTool(ctx context.Context, args map[string]interf
 }
 
 func (s *Server) listInvoicesTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.Billing.ListInvoices(ctx)
+	resp, err := s.requestJSON(ctx, http.MethodGet, "billing/history", nil)
 	if err != nil {
 		return nil, err
 	}
-	return jsonResult(resp)
+	return jsonResult(normalizeCollectionResponse(resp, "invoices"))
 }
 
 func (s *Server) listServiceAccountTokensTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
