@@ -1523,6 +1523,178 @@ func TestGetProjectToolFallsBackToProjectNamesWhenWorkspaceProjectsEmpty(t *test
 	}
 }
 
+func TestGetProjectToolFallsBackToProjectNamesUsingSlugifiedName(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceOne := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	workspaceTwo := "6f36dd81-50e9-4ea3-8094-8e0212684a11"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceOne+`"},{"ID":2,"UUID":"`+workspaceTwo+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceOne:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Projects":[]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceTwo:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Projects":[]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/fetch-names":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"projects":[{"UUID":"p2","Name":"Faulty Art","ID":1488}]}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/fetch/p2":
+				switch got := r.URL.Query().Get("workspace_uuid"); got {
+				case workspaceOne:
+					return jsonHTTPResponse(r, http.StatusNotFound, `{"message":"project not found"}`), nil
+				case workspaceTwo:
+					return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","message":"ok","data":{"project":{"UUID":"p2","Name":"Faulty Art","Description":"resolved by slugified project names lookup"}}}`), nil
+				default:
+					t.Fatalf("workspace_uuid = %q, want one of %q or %q", got, workspaceOne, workspaceTwo)
+					return nil, nil
+				}
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getProjectTool(context.Background(), map[string]interface{}{"project_id": "faulty-art"})
+	if err != nil {
+		t.Fatalf("getProjectTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	project, ok := data["project"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected project map, got %v", data["project"])
+	}
+	if got := project["UUID"]; got != "p2" {
+		t.Fatalf("UUID = %v, want %q", got, "p2")
+	}
+	if got := project["Description"]; got != "resolved by slugified project names lookup" {
+		t.Fatalf("Description = %v, want %q", got, "resolved by slugified project names lookup")
+	}
+	if requests["/project/fetch-names"] != 1 {
+		t.Fatalf("project/fetch-names calls = %d, want 1", requests["/project/fetch-names"])
+	}
+	if requests["/project/fetch/p2"] != 3 {
+		t.Fatalf("project/fetch/p2 calls = %d, want 3", requests["/project/fetch/p2"])
+	}
+}
+
+func TestGetProjectToolReturnsProjectReferenceWhenWorkspaceCannotBeResolved(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceOne := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	workspaceTwo := "6f36dd81-50e9-4ea3-8094-8e0212684a11"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceOne+`"},{"ID":2,"UUID":"`+workspaceTwo+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceOne:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Projects":[]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceTwo:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"Projects":[]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/fetch-names":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"projects":[{"UUID":"p2","Name":"Faulty Art","ID":1488}]}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/fetch/p2":
+				switch got := r.URL.Query().Get("workspace_uuid"); got {
+				case workspaceOne, workspaceTwo:
+					return jsonHTTPResponse(r, http.StatusNotFound, `{"message":"project not found"}`), nil
+				default:
+					t.Fatalf("workspace_uuid = %q, want one of %q or %q", got, workspaceOne, workspaceTwo)
+					return nil, nil
+				}
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getProjectTool(context.Background(), map[string]interface{}{"project_id": "faulty-art"})
+	if err != nil {
+		t.Fatalf("getProjectTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	project, ok := data["project"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected project map, got %v", data["project"])
+	}
+	if got := project["UUID"]; got != "p2" {
+		t.Fatalf("UUID = %v, want %q", got, "p2")
+	}
+	if got := project["Name"]; got != "Faulty Art" {
+		t.Fatalf("Name = %v, want %q", got, "Faulty Art")
+	}
+	if got := project["NameSlug"]; got != "faulty-art" {
+		t.Fatalf("NameSlug = %v, want %q", got, "faulty-art")
+	}
+	if requests["/project/fetch-names"] != 1 {
+		t.Fatalf("project/fetch-names calls = %d, want 1", requests["/project/fetch-names"])
+	}
+	if requests["/project/fetch/p2"] != 3 {
+		t.Fatalf("project/fetch/p2 calls = %d, want 3", requests["/project/fetch/p2"])
+	}
+	if requests["/workspace"] != 2 {
+		t.Fatalf("workspace requests = %d, want 2", requests["/workspace"])
+	}
+}
+
 func TestGetProjectToolRetriesWithResolvedWorkspaceForDirectIdentifier(t *testing.T) {
 	t.Parallel()
 

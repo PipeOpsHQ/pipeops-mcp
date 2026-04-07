@@ -1929,7 +1929,7 @@ func workspaceReferenceIdentifiers(workspace workspaceReference) []string {
 }
 
 func normalizeProject(project map[string]interface{}) map[string]interface{} {
-	normalized := make(map[string]interface{}, len(project)+3)
+	normalized := make(map[string]interface{}, len(project)+4)
 	for key, value := range project {
 		normalized[key] = value
 	}
@@ -1946,6 +1946,13 @@ func normalizeProject(project map[string]interface{}) map[string]interface{} {
 	if _, ok := normalized["Name"]; !ok {
 		if name := extractString(lookupValue(project, "Name", "name")); name != "" {
 			normalized["Name"] = name
+		}
+	}
+	if _, ok := normalized["NameSlug"]; !ok {
+		if slug := extractString(lookupValue(project, "NameSlug", "name_slug", "Slug", "slug", "ProjectSlug", "project_slug")); slug != "" {
+			normalized["NameSlug"] = slug
+		} else if slug := normalizeIdentifierSlug(extractString(lookupValue(normalized, "Name", "name"))); slug != "" {
+			normalized["NameSlug"] = slug
 		}
 	}
 	return normalized
@@ -1972,6 +1979,29 @@ func projectIdentity(project map[string]interface{}) string {
 	return ""
 }
 
+func normalizeIdentifierSlug(value string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(value))
+	if trimmed == "" {
+		return ""
+	}
+
+	var builder strings.Builder
+	lastHyphen := false
+	for _, r := range trimmed {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			builder.WriteRune(r)
+			lastHyphen = false
+			continue
+		}
+		if !lastHyphen {
+			builder.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+
+	return strings.Trim(builder.String(), "-")
+}
+
 func projectMatchesIdentifier(project map[string]interface{}, identifier string) bool {
 	for _, key := range []string{"UUID", "uuid", "ProjectUUID", "project_uuid", "ID", "id", "Name", "name", "NameSlug", "name_slug", "Slug", "slug", "ProjectSlug", "project_slug"} {
 		if extractString(lookupValue(project, key)) == identifier {
@@ -1980,6 +2010,16 @@ func projectMatchesIdentifier(project map[string]interface{}, identifier string)
 	}
 	for _, key := range []string{"Name", "name", "NameSlug", "name_slug", "Slug", "slug"} {
 		if strings.EqualFold(extractString(lookupValue(project, key)), identifier) {
+			return true
+		}
+	}
+
+	normalizedIdentifier := normalizeIdentifierSlug(identifier)
+	if normalizedIdentifier == "" {
+		return false
+	}
+	for _, key := range []string{"Name", "name", "NameSlug", "name_slug", "Slug", "slug", "ProjectSlug", "project_slug"} {
+		if normalizeIdentifierSlug(extractString(lookupValue(project, key))) == normalizedIdentifier {
 			return true
 		}
 	}
@@ -2042,6 +2082,10 @@ func isLikelyDirectProjectIdentifier(value string) bool {
 }
 
 func (s *Server) findProjectReference(ctx context.Context, projectID, workspaceID string) (workspaceReference, map[string]interface{}, error) {
+	return s.findProjectReferenceWithFallback(ctx, projectID, workspaceID, false)
+}
+
+func (s *Server) findProjectReferenceWithFallback(ctx context.Context, projectID, workspaceID string, allowUnresolved bool) (workspaceReference, map[string]interface{}, error) {
 	var (
 		workspaces []workspaceReference
 		err        error
@@ -2087,14 +2131,18 @@ func (s *Server) findProjectReference(ctx context.Context, projectID, workspaceI
 			continue
 		}
 
-		workspace, resolveErr := s.resolveProjectReferenceWorkspace(ctx, project, workspaces)
+		normalizedProject := normalizeProject(project)
+		workspace, resolveErr := s.resolveProjectReferenceWorkspace(ctx, normalizedProject, workspaces)
 		if resolveErr != nil {
 			return workspaceReference{}, nil, resolveErr
 		}
 		if workspace.UUID == "" && workspace.ID == "" {
+			if allowUnresolved && strings.TrimSpace(workspaceID) == "" {
+				return workspaceReference{}, normalizedProject, nil
+			}
 			continue
 		}
-		return workspace, normalizeProject(project), nil
+		return workspace, normalizedProject, nil
 	}
 
 	return workspaceReference{}, nil, nil
@@ -2574,7 +2622,7 @@ func (s *Server) getProjectTool(ctx context.Context, args map[string]interface{}
 		directErr = err
 	}
 
-	workspace, project, err := s.findProjectReference(ctx, req.ProjectID, req.WorkspaceID)
+	workspace, project, err := s.findProjectReferenceWithFallback(ctx, req.ProjectID, req.WorkspaceID, true)
 	if err != nil {
 		return nil, err
 	}
