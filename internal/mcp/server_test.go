@@ -981,6 +981,410 @@ func TestDeployAddOnToolFallsBackToFirstWorkspace(t *testing.T) {
 	}
 }
 
+func TestGetServerToolFallsBackToWorkspaceLookupForServerSlug(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceOne := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	workspaceTwo := "6f36dd81-50e9-4ea3-8094-8e0212684a11"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceOne+`"},{"ID":2,"UUID":"`+workspaceTwo+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceOne:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"`+workspaceOne+`","Clusters":[{"Cluster":{"uuid":"srv1","name":"other-node","cloudProvider":"aws","region":"us-east-1"}}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceTwo:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"`+workspaceTwo+`","Clusters":[{"Cluster":{"uuid":"srv2","name":"Faulty Art","cloudProvider":"aws","region":"us-east-1","status":"running"}}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/cluster/srv2":
+				if got := r.URL.Query().Get("workspace_uuid"); got != workspaceTwo {
+					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceTwo)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"clusters":[{"Cluster":{"uuid":"srv2","name":"Faulty Art","cloudProvider":"aws","region":"us-east-1","status":"running"}}]}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/cluster/faulty-art":
+				t.Fatalf("unexpected direct server request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getServerTool(context.Background(), map[string]interface{}{"server_id": "faulty-art"})
+	if err != nil {
+		t.Fatalf("getServerTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	serverPayload, ok := data["server"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected server map, got %v", data["server"])
+	}
+	if got := serverPayload["uuid"]; got != "srv2" {
+		t.Fatalf("uuid = %v, want %q", got, "srv2")
+	}
+	if got := serverPayload["name"]; got != "Faulty Art" {
+		t.Fatalf("name = %v, want %q", got, "Faulty Art")
+	}
+	if requests["/workspace"] != 1 {
+		t.Fatalf("workspace requests = %d, want 1", requests["/workspace"])
+	}
+	if requests["/workspace/fetch/"+workspaceOne] != 1 {
+		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceOne, requests["/workspace/fetch/"+workspaceOne])
+	}
+	if requests["/workspace/fetch/"+workspaceTwo] != 1 {
+		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceTwo, requests["/workspace/fetch/"+workspaceTwo])
+	}
+	if requests["/cluster/srv2"] != 1 {
+		t.Fatalf("cluster/srv2 calls = %d, want 1", requests["/cluster/srv2"])
+	}
+	if requests["/cluster/faulty-art"] != 0 {
+		t.Fatalf("cluster/faulty-art calls = %d, want 0", requests["/cluster/faulty-art"])
+	}
+}
+
+func TestGetClusterConnectionToolFallsBackToWorkspaceLookupForServerSlug(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceOne := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	workspaceTwo := "6f36dd81-50e9-4ea3-8094-8e0212684a11"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceOne+`"},{"ID":2,"UUID":"`+workspaceTwo+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceOne:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"`+workspaceOne+`","Clusters":[{"Cluster":{"uuid":"srv1","name":"other-node"}}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceTwo:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"`+workspaceTwo+`","Clusters":[{"Cluster":{"uuid":"srv2","name":"Faulty Art"}}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/srv2/connection":
+				return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","message":"ok","data":{"connection":{"kubeconfig":"abc123"}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/api/v1/clusters/faulty-art/connection":
+				t.Fatalf("unexpected direct connection request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getClusterConnectionTool(context.Background(), map[string]interface{}{"cluster_id": "faulty-art"})
+	if err != nil {
+		t.Fatalf("getClusterConnectionTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	connection, ok := data["connection"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected connection map, got %v", data["connection"])
+	}
+	if got := connection["kubeconfig"]; got != "abc123" {
+		t.Fatalf("kubeconfig = %v, want %q", got, "abc123")
+	}
+	if requests["/api/v1/clusters/srv2/connection"] != 1 {
+		t.Fatalf("api/v1/clusters/srv2/connection calls = %d, want 1", requests["/api/v1/clusters/srv2/connection"])
+	}
+	if requests["/api/v1/clusters/faulty-art/connection"] != 0 {
+		t.Fatalf("api/v1/clusters/faulty-art/connection calls = %d, want 0", requests["/api/v1/clusters/faulty-art/connection"])
+	}
+}
+
+func TestListAddOnDeploymentsToolResolvesExplicitWorkspaceIDToUUID(t *testing.T) {
+	t.Parallel()
+
+	workspaceLookups := 0
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/workspace":
+				workspaceLookups++
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"workspaces":[{"id":"1","uuid":"ws_explicit_uuid"}]}}`), nil
+			case "/addons/deployments/overview":
+				if got := r.URL.Query().Get("workspace"); got != "ws_explicit_uuid" {
+					t.Fatalf("workspace = %q, want %q", got, "ws_explicit_uuid")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":[{"UID":"dep_1","Name":"Redis"}]}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listAddOnDeploymentsTool(context.Background(), map[string]interface{}{"workspace_id": "1"})
+	if err != nil {
+		t.Fatalf("listAddOnDeploymentsTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if workspaceLookups != 1 {
+		t.Fatalf("workspace lookups = %d, want 1", workspaceLookups)
+	}
+}
+
+func TestDeployAddOnToolResolvesExplicitWorkspaceIDToUUID(t *testing.T) {
+	t.Parallel()
+
+	workspaceLookups := 0
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/workspace":
+				workspaceLookups++
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"workspaces":[{"id":"1","uuid":"ws_explicit_uuid"}]}}`), nil
+			case "/addons/deploy":
+				body, readErr := io.ReadAll(r.Body)
+				if readErr != nil {
+					t.Fatalf("ReadAll body error: %v", readErr)
+				}
+				var payload map[string]interface{}
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("unmarshal body error: %v", err)
+				}
+				if got := payload["Workspace"]; got != "ws_explicit_uuid" {
+					t.Fatalf("Workspace = %#v, want %q", got, "ws_explicit_uuid")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","data":{"deployment":{"UID":"dep_1"}}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.deployAddOnTool(context.Background(), map[string]interface{}{"workspace_id": "1", "addon_id": "addon_123"})
+	if err != nil {
+		t.Fatalf("deployAddOnTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if workspaceLookups != 1 {
+		t.Fatalf("workspace lookups = %d, want 1", workspaceLookups)
+	}
+}
+
+func TestCreateEnvironmentToolResolvesWorkspaceUUIDFromID(t *testing.T) {
+	t.Parallel()
+
+	workspaceLookups := 0
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/workspace":
+				workspaceLookups++
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"workspaces":[{"id":"1","uuid":"ws_env_uuid"}]}}`), nil
+			case "/environment/create":
+				if got := r.URL.Query().Get("workspace_uuid"); got != "ws_env_uuid" {
+					t.Fatalf("workspace_uuid = %q, want %q", got, "ws_env_uuid")
+				}
+				body, readErr := io.ReadAll(r.Body)
+				if readErr != nil {
+					t.Fatalf("ReadAll body error: %v", readErr)
+				}
+				var payload map[string]interface{}
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("unmarshal body error: %v", err)
+				}
+				if got := payload["workspace_uuid"]; got != "ws_env_uuid" {
+					t.Fatalf("workspace_uuid body = %#v, want %q", got, "ws_env_uuid")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","message":"ok","data":{"environment":{"uuid":"env1","name":"prod"}}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.createEnvironmentTool(context.Background(), map[string]interface{}{"name": "prod", "workspace_id": "1"})
+	if err != nil {
+		t.Fatalf("createEnvironmentTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if workspaceLookups != 1 {
+		t.Fatalf("workspace lookups = %d, want 1", workspaceLookups)
+	}
+}
+
+func TestCreateExternalRegistryToolResolvesWorkspaceUUIDFromID(t *testing.T) {
+	t.Parallel()
+
+	workspaceLookups := 0
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/workspace":
+				workspaceLookups++
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"workspaces":[{"id":"1","uuid":"ws_registry_uuid"}]}}`), nil
+			case "/api/v1/external-registry":
+				if got := r.URL.Query().Get("workspace_uuid"); got != "ws_registry_uuid" {
+					t.Fatalf("workspace_uuid = %q, want %q", got, "ws_registry_uuid")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"uid":"reg1","name":"Docker Hub","type":"dockerhub"}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.createExternalRegistryTool(context.Background(), map[string]interface{}{
+		"workspace_id": "1",
+		"name":         "Docker Hub",
+		"type":         "dockerhub",
+		"username":     "demo",
+		"password":     "secret",
+	})
+	if err != nil {
+		t.Fatalf("createExternalRegistryTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if workspaceLookups != 1 {
+		t.Fatalf("workspace lookups = %d, want 1", workspaceLookups)
+	}
+}
+
+func TestDeployProjectFromImageToolResolvesWorkspaceUUIDFromID(t *testing.T) {
+	t.Parallel()
+
+	workspaceLookups := 0
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/workspace":
+				workspaceLookups++
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"workspaces":[{"id":"1","uuid":"ws_byoi_uuid"}]}}`), nil
+			case "/project/deploy-from-image":
+				body, readErr := io.ReadAll(r.Body)
+				if readErr != nil {
+					t.Fatalf("ReadAll body error: %v", readErr)
+				}
+				var payload map[string]interface{}
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("unmarshal body error: %v", err)
+				}
+				if got := payload["workspace_uuid"]; got != "ws_byoi_uuid" {
+					t.Fatalf("workspace_uuid = %#v, want %q", got, "ws_byoi_uuid")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"project_uuid":"p1","project_name":"nginx-demo","container_image":"docker.io/library/nginx:latest","image_tag":"latest","status":"pending","domain":"https://nginx-demo.example.com","build_sha":"sha123"}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.deployProjectFromImageTool(context.Background(), map[string]interface{}{
+		"name":            "nginx-demo",
+		"container_image": "docker.io/library/nginx:latest",
+		"image_tag":       "latest",
+		"port":            80,
+		"vcpu":            1,
+		"memory": map[string]interface{}{
+			"value": 512,
+			"unit":  "Mi",
+		},
+		"server_id":      "srv1",
+		"environment_id": "env1",
+		"workspace_id":   "1",
+	})
+	if err != nil {
+		t.Fatalf("deployProjectFromImageTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if workspaceLookups != 1 {
+		t.Fatalf("workspace lookups = %d, want 1", workspaceLookups)
+	}
+}
+
 func TestListProjectsToolAggregatesAcrossWorkspacesUsingWorkspaceFetchIDFallback(t *testing.T) {
 	t.Parallel()
 

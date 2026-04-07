@@ -1074,7 +1074,23 @@ func (s *Server) resolveDefaultWorkspaceUUID(ctx context.Context, args map[strin
 	if err != nil {
 		return "", err
 	}
+
+	explicitWorkspaceID, hasExplicitWorkspace := args["workspace_id"].(string)
+	if !hasExplicitWorkspace || strings.TrimSpace(explicitWorkspaceID) == "" {
+		return workspaceID, nil
+	}
 	if isLikelyUUID(workspaceID) {
+		return workspaceID, nil
+	}
+
+	isNumericWorkspaceID := true
+	for _, r := range strings.TrimSpace(workspaceID) {
+		if r < '0' || r > '9' {
+			isNumericWorkspaceID = false
+			break
+		}
+	}
+	if !isNumericWorkspaceID {
 		return workspaceID, nil
 	}
 
@@ -1086,6 +1102,14 @@ func (s *Server) resolveDefaultWorkspaceUUID(ctx context.Context, args map[strin
 		return workspace.UUID, nil
 	}
 	return workspaceID, nil
+}
+
+func (s *Server) resolveWorkspaceUUID(ctx context.Context, workspaceID string) (string, error) {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return "", fmt.Errorf("workspace_id is required")
+	}
+	return s.resolveDefaultWorkspaceUUID(ctx, map[string]interface{}{"workspace_id": workspaceID})
 }
 
 func jsonResult(v interface{}) (interface{}, error) {
@@ -2276,6 +2300,16 @@ func clusterMatchesIdentifier(cluster map[string]interface{}, identifier string)
 			return true
 		}
 	}
+
+	normalizedIdentifier := normalizeIdentifierSlug(identifier)
+	if normalizedIdentifier == "" {
+		return false
+	}
+	for _, key := range []string{"Name", "name", "NameSlug", "name_slug", "Slug", "slug", "ServerCode", "server_code"} {
+		if normalizeIdentifierSlug(extractString(lookupValue(cluster, key))) == normalizedIdentifier {
+			return true
+		}
+	}
 	return false
 }
 
@@ -2283,6 +2317,7 @@ func clusterWorkspaceUUID(cluster map[string]interface{}, workspace workspaceRef
 	candidates := []string{
 		extractString(lookupValue(cluster, "WorkspaceUUID", "workspace_uuid")),
 		workspace.UUID,
+		workspace.ID,
 		extractString(lookupValue(cluster, "WorkspaceID", "workspace_id")),
 	}
 	for _, candidate := range candidates {
@@ -2770,6 +2805,11 @@ func (s *Server) deployProjectFromImageTool(ctx context.Context, args map[string
 		return nil, fmt.Errorf("workspace_id is required")
 	}
 
+	workspaceUUID, err := s.resolveWorkspaceUUID(ctx, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+
 	resp, _, err := s.client.Projects.DeployFromImage(ctx, &pipeops.DeployFromImageRequest{
 		Name:               req.Name,
 		ContainerImage:     req.ContainerImage,
@@ -2785,7 +2825,7 @@ func (s *Server) deployProjectFromImageTool(ctx context.Context, args map[string
 		},
 		ClusterUUID:     serverID,
 		EnvironmentUUID: req.EnvironmentID,
-		WorkspaceUUID:   req.WorkspaceID,
+		WorkspaceUUID:   workspaceUUID,
 		Preset:          req.Preset,
 	})
 	if err != nil {
@@ -2924,6 +2964,10 @@ func (s *Server) createExternalRegistryTool(ctx context.Context, args map[string
 	if req.WorkspaceID == "" {
 		return nil, fmt.Errorf("workspace_id is required")
 	}
+	workspaceUUID, err := s.resolveWorkspaceUUID(ctx, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
 	if req.Name == "" {
 		return nil, fmt.Errorf("name is required")
 	}
@@ -2937,7 +2981,7 @@ func (s *Server) createExternalRegistryTool(ctx context.Context, args map[string
 		return nil, fmt.Errorf("password is required")
 	}
 
-	resp, _, err := s.client.ExternalRegistries.Create(ctx, req.WorkspaceID, &pipeops.CreateExternalRegistryRequest{
+	resp, _, err := s.client.ExternalRegistries.Create(ctx, workspaceUUID, &pipeops.CreateExternalRegistryRequest{
 		Name:        req.Name,
 		Type:        req.Type,
 		Username:    req.Username,
@@ -2961,7 +3005,12 @@ func (s *Server) listExternalRegistriesTool(ctx context.Context, args map[string
 		return nil, fmt.Errorf("workspace_id is required")
 	}
 
-	resp, _, err := s.client.ExternalRegistries.List(ctx, req.WorkspaceID, &pipeops.ExternalRegistryListOptions{
+	workspaceUUID, err := s.resolveWorkspaceUUID(ctx, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ExternalRegistries.List(ctx, workspaceUUID, &pipeops.ExternalRegistryListOptions{
 		Page:     req.Page,
 		PageSize: req.Limit,
 	})
@@ -3182,16 +3231,54 @@ func (s *Server) getServerTool(ctx context.Context, args map[string]interface{})
 	if err != nil {
 		return nil, err
 	}
-	workspaceID, err := s.resolveWorkspaceID(ctx, args)
-	if err != nil {
-		return nil, err
+	workspaceID, _ := args["workspace_id"].(string)
+
+	var directErr error
+	if isLikelyDirectProjectIdentifier(serverID) && strings.TrimSpace(workspaceID) != "" {
+		resolvedWorkspaceUUID, resolveErr := s.resolveWorkspaceUUID(ctx, workspaceID)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		resp, _, err := s.client.Servers.Get(ctx, serverID, resolvedWorkspaceUUID)
+		if err == nil {
+			return jsonResult(resp)
+		}
+		if !isWorkspaceProjectsFallbackError(err) {
+			return nil, err
+		}
+		directErr = err
 	}
 
-	resp, _, err := s.client.Servers.Get(ctx, serverID, workspaceID)
+	workspace, cluster, err := s.findClusterReference(ctx, serverID, workspaceID)
 	if err != nil {
 		return nil, err
 	}
-	return jsonResult(resp)
+	if cluster == nil {
+		if directErr != nil {
+			return nil, directErr
+		}
+		return nil, fmt.Errorf("server %q not found", serverID)
+	}
+
+	resolvedClusterID := clusterIdentity(cluster)
+	resolvedWorkspaceUUID := clusterWorkspaceUUID(cluster, workspace)
+	if resolvedClusterID != "" && resolvedWorkspaceUUID != "" {
+		resp, _, err := s.client.Servers.Get(ctx, resolvedClusterID, resolvedWorkspaceUUID)
+		if err == nil {
+			return jsonResult(resp)
+		}
+		if !isWorkspaceProjectsFallbackError(err) {
+			return nil, err
+		}
+	}
+
+	return jsonResult(map[string]interface{}{
+		"status":  "success",
+		"message": "ok",
+		"data": map[string]interface{}{
+			"server": normalizeServer(cluster, workspace),
+		},
+	})
 }
 
 func (s *Server) getClusterConnectionTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -3203,7 +3290,38 @@ func (s *Server) getClusterConnectionTool(ctx context.Context, args map[string]i
 		return nil, fmt.Errorf("cluster_id is required")
 	}
 
-	resp, _, err := s.client.Servers.GetClusterConnection(ctx, clusterID)
+	var directErr error
+	if isLikelyDirectProjectIdentifier(clusterID) {
+		resp, _, err := s.client.Servers.GetClusterConnection(ctx, clusterID)
+		if err == nil {
+			return jsonResult(resp)
+		}
+		if !isWorkspaceProjectsFallbackError(err) {
+			return nil, err
+		}
+		directErr = err
+	}
+
+	_, cluster, err := s.findClusterReference(ctx, clusterID, "")
+	if err != nil {
+		return nil, err
+	}
+	if cluster == nil {
+		if directErr != nil {
+			return nil, directErr
+		}
+		return nil, fmt.Errorf("cluster %q not found", clusterID)
+	}
+
+	resolvedClusterID := clusterIdentity(cluster)
+	if resolvedClusterID == "" {
+		if directErr != nil {
+			return nil, directErr
+		}
+		return nil, fmt.Errorf("cluster %q not found", clusterID)
+	}
+
+	resp, _, err := s.client.Servers.GetClusterConnection(ctx, resolvedClusterID)
 	if err != nil {
 		return nil, err
 	}
@@ -3516,6 +3634,12 @@ func (s *Server) createEnvironmentTool(ctx context.Context, args map[string]inte
 	if req.WorkspaceID == "" {
 		return nil, fmt.Errorf("workspace_id is required")
 	}
+
+	workspaceUUID, err := s.resolveWorkspaceUUID(ctx, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	req.WorkspaceUUID = workspaceUUID
 
 	resp, _, err := s.client.Environments.Create(ctx, &req)
 	if err != nil {
@@ -3831,7 +3955,7 @@ func (s *Server) deployAddOnTool(ctx context.Context, args map[string]interface{
 		return nil, fmt.Errorf("addon_id is required")
 	}
 
-	workspaceID, err := s.resolveDefaultWorkspaceID(ctx, args)
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
 	if err != nil {
 		return nil, err
 	}
@@ -3840,7 +3964,7 @@ func (s *Server) deployAddOnTool(ctx context.Context, args map[string]interface{
 		ID:        req.AddOnID,
 		ProjectID: req.ProjectID,
 		Server:    req.ServerID,
-		Workspace: workspaceID,
+		Workspace: workspaceUUID,
 		Config:    req.Config,
 	})
 	if err != nil {
@@ -3850,12 +3974,12 @@ func (s *Server) deployAddOnTool(ctx context.Context, args map[string]interface{
 }
 
 func (s *Server) listAddOnDeploymentsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	workspaceID, err := s.resolveDefaultWorkspaceID(ctx, args)
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, _, err := s.client.AddOns.ListDeployments(ctx, &pipeops.ListDeploymentsOptions{WorkspaceUUID: workspaceID})
+	resp, _, err := s.client.AddOns.ListDeployments(ctx, &pipeops.ListDeploymentsOptions{WorkspaceUUID: workspaceUUID})
 	if err != nil {
 		return nil, err
 	}
