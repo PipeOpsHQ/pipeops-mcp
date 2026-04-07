@@ -148,6 +148,48 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
+				Name:        "list_project_deployments",
+				Description: "List build or git deployments for a project",
+				InputSchema: objectSchema(map[string]interface{}{
+					"project_id":   stringProperty("The project ID, UUID, name, or slug"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override for project resolution"),
+					"filter_by":    stringProperty("Optional deployment view: build or git"),
+					"page":         integerProperty("Optional page number"),
+					"limit":        integerProperty("Optional page size"),
+				}, "project_id"),
+			},
+			handler: s.listProjectDeploymentsTool,
+		},
+		{
+			tool: Tool{
+				Name:        "list_project_deployment_history",
+				Description: "List deployment history records for a project",
+				InputSchema: objectSchema(map[string]interface{}{
+					"project_id":   stringProperty("The project ID, UUID, name, or slug"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override for project resolution"),
+					"page":         integerProperty("Optional page number"),
+					"limit":        integerProperty("Optional page size"),
+				}, "project_id"),
+			},
+			handler: s.listProjectDeploymentHistoryTool,
+		},
+		{
+			tool: Tool{
+				Name:        "search_project_deployments",
+				Description: "Search project deployments for a project by SHA, status, commit message, URL, or related values",
+				InputSchema: objectSchema(map[string]interface{}{
+					"project_id":   stringProperty("The project ID, UUID, name, or slug"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override for project resolution"),
+					"filter_by":    stringProperty("Optional deployment view: build or git"),
+					"search":       stringProperty("Search text to match against deployment values"),
+					"page":         integerProperty("Optional page number"),
+					"limit":        integerProperty("Optional page size"),
+				}, "project_id", "search"),
+			},
+			handler: s.searchProjectDeploymentsTool,
+		},
+		{
+			tool: Tool{
 				Name:        "get_project_env_variables",
 				Description: "Get environment variables for a project",
 				InputSchema: objectSchema(map[string]interface{}{
@@ -1270,6 +1312,259 @@ func withWorkspaceUUIDQuery(path, workspaceUUID string) string {
 	return withQueryValues(path, map[string]string{"workspace_uuid": workspaceUUID})
 }
 
+func buildProjectLogsQueryValues(opts *pipeops.LogsOptions, includeWorkspace bool) map[string]string {
+	values := map[string]string{"app": "project"}
+	if opts == nil {
+		return values
+	}
+	if app := strings.TrimSpace(opts.App); app != "" {
+		values["app"] = app
+	}
+	if includeWorkspace {
+		workspaceUUID := strings.TrimSpace(opts.WorkspaceUUID)
+		if workspaceUUID == "" {
+			workspaceUUID = strings.TrimSpace(opts.WorkspaceID)
+		}
+		if workspaceUUID != "" {
+			values["workspace_uuid"] = workspaceUUID
+		}
+	}
+	if start := strings.TrimSpace(opts.Start); start != "" {
+		values["start"] = start
+	} else if start := strings.TrimSpace(opts.StartTime); start != "" {
+		values["start"] = start
+	}
+	if end := strings.TrimSpace(opts.End); end != "" {
+		values["end"] = end
+	} else if end := strings.TrimSpace(opts.EndTime); end != "" {
+		values["end"] = end
+	}
+	if opts.Limit > 0 {
+		values["limit"] = fmt.Sprintf("%d", opts.Limit)
+	}
+	if search := strings.TrimSpace(opts.Search); search != "" {
+		values["search"] = search
+	}
+	if logMode := strings.TrimSpace(opts.Log); logMode != "" {
+		values["log"] = logMode
+	}
+	if opts.Delay > 0 {
+		values["delay"] = fmt.Sprintf("%d", opts.Delay)
+	}
+	return values
+}
+
+func normalizeLogsResponse(resp map[string]interface{}) map[string]interface{} {
+	normalized := make(map[string]interface{}, len(resp))
+	for key, value := range resp {
+		normalized[key] = value
+	}
+
+	switch data := normalized["data"].(type) {
+	case nil:
+		normalized["data"] = map[string]interface{}{"logs": []interface{}{}}
+	case []interface{}:
+		normalized["data"] = map[string]interface{}{"logs": data}
+	case map[string]interface{}:
+		if _, ok := data["logs"]; ok {
+			return normalized
+		}
+		if len(data) == 0 {
+			normalized["data"] = map[string]interface{}{"logs": []interface{}{}}
+			return normalized
+		}
+		normalized["data"] = map[string]interface{}{"logs": []interface{}{data}}
+	default:
+		normalized["data"] = map[string]interface{}{"logs": []interface{}{data}}
+	}
+	return normalized
+}
+
+func (s *Server) requestProjectLogs(ctx context.Context, projectID string, opts *pipeops.LogsOptions, includeWorkspace bool) (map[string]interface{}, error) {
+	path := withQueryValues(
+		fmt.Sprintf("project/logs/%s", url.PathEscape(strings.TrimSpace(projectID))),
+		buildProjectLogsQueryValues(opts, includeWorkspace),
+	)
+
+	resp, err := s.requestJSON(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch logs: %w", err)
+	}
+	return normalizeLogsResponse(resp), nil
+}
+
+func buildProjectDeploymentsQueryValues(filterBy string, page, limit int) map[string]string {
+	values := map[string]string{}
+	if normalizedFilter := strings.TrimSpace(filterBy); normalizedFilter != "" {
+		values["filterBy"] = normalizedFilter
+	}
+	if page > 0 {
+		values["page"] = fmt.Sprintf("%d", page)
+	}
+	if limit > 0 {
+		values["limit"] = fmt.Sprintf("%d", limit)
+	}
+	return values
+}
+
+func (s *Server) requestProjectDeployments(ctx context.Context, projectID string, filterBy string, page, limit int) (map[string]interface{}, error) {
+	path := withQueryValues(
+		fmt.Sprintf("project/get-deployments/%s", url.PathEscape(strings.TrimSpace(projectID))),
+		buildProjectDeploymentsQueryValues(filterBy, page, limit),
+	)
+
+	resp, err := s.requestJSON(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list project deployments: %w", err)
+	}
+	return normalizeCollectionResponse(resp, "deployments"), nil
+}
+
+func (s *Server) requestProjectDeploymentHistory(ctx context.Context, projectID string, page, limit int) (map[string]interface{}, error) {
+	path := withQueryValues(
+		fmt.Sprintf("project/deployment/%s", url.PathEscape(strings.TrimSpace(projectID))),
+		buildProjectDeploymentsQueryValues("", page, limit),
+	)
+
+	resp, err := s.requestJSON(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list project deployment history: %w", err)
+	}
+	return normalizeCollectionResponse(resp, "deployments"), nil
+}
+
+func responseCollectionItems(resp map[string]interface{}, key string) []map[string]interface{} {
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	items, ok := data[key].([]interface{})
+	if !ok {
+		return nil
+	}
+
+	results := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		payload, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		results = append(results, payload)
+	}
+	return results
+}
+
+func setCollectionItems(resp map[string]interface{}, key string, items []map[string]interface{}) map[string]interface{} {
+	normalized := normalizeCollectionResponse(resp, key)
+	data, ok := normalized["data"].(map[string]interface{})
+	if !ok {
+		data = map[string]interface{}{}
+	}
+	serialized := make([]interface{}, 0, len(items))
+	for _, item := range items {
+		serialized = append(serialized, item)
+	}
+	data[key] = serialized
+	normalized["data"] = data
+
+	meta, ok := normalized["meta"].(map[string]interface{})
+	if !ok {
+		meta = map[string]interface{}{}
+	}
+	meta["current_count"] = len(items)
+	normalized["meta"] = meta
+	return normalized
+}
+
+func attachProjectToCollectionResponse(resp map[string]interface{}, project map[string]interface{}) map[string]interface{} {
+	if project == nil {
+		return resp
+	}
+	normalized := make(map[string]interface{}, len(resp))
+	for key, value := range resp {
+		normalized[key] = value
+	}
+	data, ok := normalized["data"].(map[string]interface{})
+	if !ok {
+		data = map[string]interface{}{}
+	}
+	data["project"] = normalizeProject(project)
+	normalized["data"] = data
+	return normalized
+}
+
+func searchTextForValue(value interface{}) string {
+	switch typed := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return typed
+	case []interface{}:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(searchTextForValue(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, " ")
+	case map[string]interface{}:
+		parts := make([]string, 0, len(typed))
+		for _, item := range typed {
+			if text := strings.TrimSpace(searchTextForValue(item)); text != "" {
+				parts = append(parts, text)
+			}
+		}
+		return strings.Join(parts, " ")
+	default:
+		return fmt.Sprintf("%v", typed)
+	}
+}
+
+func deploymentMatchesSearch(item map[string]interface{}, query string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(searchTextForValue(item)), query)
+}
+
+func filterDeploymentItems(items []map[string]interface{}, query string) []map[string]interface{} {
+	if strings.TrimSpace(query) == "" {
+		return items
+	}
+	filtered := make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		if deploymentMatchesSearch(item, query) {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func (s *Server) resolveProjectDeploymentTarget(ctx context.Context, projectID, workspaceID string) (string, map[string]interface{}, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "", nil, fmt.Errorf("project_id is required")
+	}
+	if isLikelyDirectProjectIdentifier(projectID) {
+		return projectID, nil, nil
+	}
+
+	_, project, err := s.findProjectReferenceWithFallback(ctx, projectID, workspaceID, true)
+	if err != nil {
+		return "", nil, err
+	}
+	if project == nil {
+		return "", nil, fmt.Errorf("project %q not found", projectID)
+	}
+
+	resolvedProjectID := projectIdentity(project)
+	if resolvedProjectID == "" {
+		return "", nil, fmt.Errorf("project %q not found", projectID)
+	}
+	return resolvedProjectID, normalizeProject(project), nil
+}
+
 func withClusterCostAllocationQuery(path, workspaceUUID, aggregate, window string) string {
 	aggregate = strings.TrimSpace(aggregate)
 	if aggregate == "" {
@@ -1405,6 +1700,23 @@ type projectLogsArgs struct {
 	EndTime     string `json:"end_time,omitempty"`
 	Limit       int    `json:"limit,omitempty"`
 	Search      string `json:"search,omitempty"`
+}
+
+type projectDeploymentsArgs struct {
+	ProjectID   string `json:"project_id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	FilterBy    string `json:"filter_by,omitempty"`
+	Page        int    `json:"page,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+}
+
+type searchProjectDeploymentsArgs struct {
+	ProjectID   string `json:"project_id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	FilterBy    string `json:"filter_by,omitempty"`
+	Search      string `json:"search"`
+	Page        int    `json:"page,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
 }
 
 type projectEnvVariablesArgs struct {
@@ -2747,6 +3059,25 @@ func isWorkspaceProjectsFallbackError(err error) bool {
 	}
 }
 
+func isProjectLogsRetryableError(err error) bool {
+	if isWorkspaceProjectsFallbackError(err) {
+		return true
+	}
+	var apiErr *pipeops.ErrorResponse
+	if !errors.As(err, &apiErr) || apiErr.Response == nil {
+		return false
+	}
+	return apiErr.Response.StatusCode >= http.StatusInternalServerError
+}
+
+func projectLogIdentifiers(project map[string]interface{}) []string {
+	identifiers := make([]string, 0, 6)
+	for _, key := range []string{"UUID", "uuid", "ID", "id", "NameSlug", "name_slug", "Slug", "slug", "ProjectSlug", "project_slug", "Name", "name"} {
+		identifiers = appendUniqueString(identifiers, extractString(lookupValue(project, key)))
+	}
+	return identifiers
+}
+
 func isBillingWorkspaceRequiredError(err error) bool {
 	var apiErr *pipeops.ErrorResponse
 	if !errors.As(err, &apiErr) || apiErr.Response == nil {
@@ -3022,6 +3353,7 @@ func (s *Server) getProjectLogsTool(ctx context.Context, args map[string]interfa
 
 	buildLogsOptions := func(workspaceUUID string) *pipeops.LogsOptions {
 		return &pipeops.LogsOptions{
+			App:           "project",
 			WorkspaceUUID: workspaceUUID,
 			StartTime:     request.StartTime,
 			EndTime:       request.EndTime,
@@ -3030,25 +3362,66 @@ func (s *Server) getProjectLogsTool(ctx context.Context, args map[string]interfa
 		}
 	}
 
-	workspaceUUID := ""
+	tryLogs := func(projectIdentifiers []string, workspaceUUIDs []string) (interface{}, error) {
+		if len(workspaceUUIDs) == 0 {
+			workspaceUUIDs = []string{""}
+		}
+
+		attempted := make(map[string]struct{})
+		var lastErr error
+		for _, projectIdentifier := range projectIdentifiers {
+			projectIdentifier = strings.TrimSpace(projectIdentifier)
+			if projectIdentifier == "" {
+				continue
+			}
+			for _, workspaceUUID := range workspaceUUIDs {
+				workspaceUUID = strings.TrimSpace(workspaceUUID)
+				attemptKey := projectIdentifier + "|" + workspaceUUID
+				if _, ok := attempted[attemptKey]; ok {
+					continue
+				}
+				attempted[attemptKey] = struct{}{}
+
+				resp, err := s.requestProjectLogs(ctx, projectIdentifier, buildLogsOptions(workspaceUUID), workspaceUUID != "")
+				if err == nil {
+					return jsonResult(resp)
+				}
+				if !isProjectLogsRetryableError(err) {
+					return nil, err
+				}
+				lastErr = err
+			}
+		}
+		return nil, lastErr
+	}
+
+	explicitWorkspaceUUID := ""
 	if request.WorkspaceID != "" {
 		workspace, err := s.resolveWorkspaceReference(ctx, request.WorkspaceID)
 		if err != nil {
 			return nil, err
 		}
-		workspaceUUID = projectWorkspaceUUID(nil, workspace)
+		explicitWorkspaceUUID = projectWorkspaceUUID(nil, workspace)
 	}
 
 	var directErr error
 	if isLikelyDirectProjectIdentifier(request.ProjectID) {
-		resp, _, err := s.client.Projects.GetLogs(ctx, request.ProjectID, buildLogsOptions(workspaceUUID))
-		if err == nil {
-			return jsonResult(resp)
+		directWorkspaceUUIDs := []string{}
+		if explicitWorkspaceUUID != "" {
+			directWorkspaceUUIDs = append(directWorkspaceUUIDs, explicitWorkspaceUUID)
 		}
-		if !isWorkspaceProjectsFallbackError(err) {
-			return nil, err
+		directWorkspaceUUIDs = append(directWorkspaceUUIDs, "")
+
+		result, err := tryLogs([]string{request.ProjectID}, directWorkspaceUUIDs)
+		if err == nil && result != nil {
+			return result, nil
 		}
-		directErr = err
+		if err != nil {
+			if !isProjectLogsRetryableError(err) {
+				return nil, err
+			}
+			directErr = err
+		}
 	}
 
 	workspace, project, err := s.findProjectReference(ctx, request.ProjectID, request.WorkspaceID)
@@ -3062,18 +3435,85 @@ func (s *Server) getProjectLogsTool(ctx context.Context, args map[string]interfa
 		return nil, fmt.Errorf("project %q not found", request.ProjectID)
 	}
 
-	resolvedProjectID := projectIdentity(project)
-	if resolvedProjectID == "" {
-		if directErr != nil {
-			return nil, directErr
-		}
-		return nil, fmt.Errorf("project %q not found", request.ProjectID)
+	workspaceUUIDs := []string{}
+	if resolvedWorkspaceUUID := projectWorkspaceUUID(project, workspace); resolvedWorkspaceUUID != "" {
+		workspaceUUIDs = append(workspaceUUIDs, resolvedWorkspaceUUID)
 	}
-	resolvedWorkspaceUUID := projectWorkspaceUUID(project, workspace)
+	if explicitWorkspaceUUID != "" {
+		workspaceUUIDs = append(workspaceUUIDs, explicitWorkspaceUUID)
+	}
+	workspaceUUIDs = append(workspaceUUIDs, "")
 
-	resp, _, err := s.client.Projects.GetLogs(ctx, resolvedProjectID, buildLogsOptions(resolvedWorkspaceUUID))
+	result, err := tryLogs(projectLogIdentifiers(project), workspaceUUIDs)
+	if err == nil && result != nil {
+		return result, nil
+	}
 	if err != nil {
 		return nil, err
+	}
+	if directErr != nil {
+		return nil, directErr
+	}
+	return nil, fmt.Errorf("project %q not found", request.ProjectID)
+}
+
+func (s *Server) listProjectDeploymentsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req projectDeploymentsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	resolvedProjectID, project, err := s.resolveProjectDeploymentTarget(ctx, req.ProjectID, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.requestProjectDeployments(ctx, resolvedProjectID, req.FilterBy, req.Page, req.Limit)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(attachProjectToCollectionResponse(resp, project))
+}
+
+func (s *Server) listProjectDeploymentHistoryTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req projectDeploymentsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	resolvedProjectID, project, err := s.resolveProjectDeploymentTarget(ctx, req.ProjectID, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.requestProjectDeploymentHistory(ctx, resolvedProjectID, req.Page, req.Limit)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(attachProjectToCollectionResponse(resp, project))
+}
+
+func (s *Server) searchProjectDeploymentsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req searchProjectDeploymentsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.Search) == "" {
+		return nil, fmt.Errorf("search is required")
+	}
+	resolvedProjectID, project, err := s.resolveProjectDeploymentTarget(ctx, req.ProjectID, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.requestProjectDeployments(ctx, resolvedProjectID, req.FilterBy, req.Page, req.Limit)
+	if err != nil {
+		return nil, err
+	}
+	filtered := filterDeploymentItems(responseCollectionItems(resp, "deployments"), req.Search)
+	resp = setCollectionItems(resp, "deployments", filtered)
+	resp = attachProjectToCollectionResponse(resp, project)
+	if meta, ok := resp["meta"].(map[string]interface{}); ok {
+		meta["search"] = strings.TrimSpace(req.Search)
+		resp["meta"] = meta
 	}
 	return jsonResult(resp)
 }
@@ -4409,11 +4849,11 @@ func (s *Server) addAddOnDomainTool(ctx context.Context, args map[string]interfa
 }
 
 func (s *Server) listAddOnCategoriesTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.AddOns.ListCategories(ctx)
+	resp, err := s.requestJSON(ctx, http.MethodGet, "addons/categories", nil)
 	if err != nil {
 		return nil, err
 	}
-	return jsonResult(resp)
+	return jsonResult(normalizeCollectionResponse(resp, "categories"))
 }
 
 func (s *Server) getMyAddOnSubmissionsTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {

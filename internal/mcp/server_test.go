@@ -68,6 +68,9 @@ func TestHandleToolsList(t *testing.T) {
 		"restart_project",
 		"stop_project",
 		"get_project_logs",
+		"list_project_deployments",
+		"list_project_deployment_history",
+		"search_project_deployments",
 		"get_project_env_variables",
 		"update_project_env_variables",
 		"deploy_project_from_image",
@@ -202,6 +205,50 @@ func TestHandleToolsListSchemas(t *testing.T) {
 
 	if _, ok := getProjectLogsProperties["workspace_id"]; !ok {
 		t.Error("Expected get_project_logs to expose workspace_id override")
+	}
+
+	listProjectDeployments := toolByName["list_project_deployments"]
+	listProjectDeploymentsProperties, ok := listProjectDeployments.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected list_project_deployments properties schema")
+	}
+
+	if _, ok := listProjectDeploymentsProperties["workspace_id"]; !ok {
+		t.Error("Expected list_project_deployments to expose workspace_id override")
+	}
+
+	listProjectDeploymentHistory := toolByName["list_project_deployment_history"]
+	listProjectDeploymentHistoryProperties, ok := listProjectDeploymentHistory.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected list_project_deployment_history properties schema")
+	}
+
+	if _, ok := listProjectDeploymentHistoryProperties["workspace_id"]; !ok {
+		t.Error("Expected list_project_deployment_history to expose workspace_id override")
+	}
+
+	searchProjectDeployments := toolByName["search_project_deployments"]
+	searchProjectDeploymentsProperties, ok := searchProjectDeployments.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected search_project_deployments properties schema")
+	}
+
+	if _, ok := searchProjectDeploymentsProperties["workspace_id"]; !ok {
+		t.Error("Expected search_project_deployments to expose workspace_id override")
+	}
+
+	searchProjectDeploymentsRequired, ok := searchProjectDeployments.InputSchema["required"].([]string)
+	if !ok {
+		t.Fatal("Expected search_project_deployments required schema to be []string")
+	}
+	searchProjectDeploymentsRequiredFields := make(map[string]bool)
+	for _, field := range searchProjectDeploymentsRequired {
+		searchProjectDeploymentsRequiredFields[field] = true
+	}
+	for _, field := range []string{"project_id", "search"} {
+		if !searchProjectDeploymentsRequiredFields[field] {
+			t.Errorf("Expected search_project_deployments to require %s", field)
+		}
 	}
 
 	listServers := toolByName["list_servers"]
@@ -2266,8 +2313,9 @@ func TestGetProjectLogsToolRetriesWithResolvedWorkspaceForDirectIdentifier(t *te
 			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
 				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceOne+`"},{"ID":2,"UUID":"`+workspaceTwo+`"}]}`), nil
 			case r.Method == http.MethodGet && r.URL.Path == "/project/logs/"+projectUUID:
-				switch got := r.URL.Query().Get("workspace_uuid"); got {
-				case workspaceOne:
+				got := r.URL.Query().Get("workspace_uuid")
+				switch got {
+				case "":
 					return jsonHTTPResponse(r, http.StatusBadRequest, `{"message":"invalid resource"}`), nil
 				case workspaceTwo:
 					if limit := r.URL.Query().Get("limit"); limit != "100" {
@@ -2275,7 +2323,7 @@ func TestGetProjectLogsToolRetriesWithResolvedWorkspaceForDirectIdentifier(t *te
 					}
 					return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":[{"message":"resolved direct id logs"}]}`), nil
 				default:
-					t.Fatalf("workspace_uuid = %q, want one of %q or %q", got, workspaceOne, workspaceTwo)
+					t.Fatalf("workspace_uuid = %q, want %q or empty", got, workspaceTwo)
 					return nil, nil
 				}
 			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceOne:
@@ -2300,14 +2348,64 @@ func TestGetProjectLogsToolRetriesWithResolvedWorkspaceForDirectIdentifier(t *te
 	if requests["/project/logs/"+projectUUID] != 2 {
 		t.Fatalf("project/logs/%s calls = %d, want 2", projectUUID, requests["/project/logs/"+projectUUID])
 	}
-	if requests["/workspace"] != 2 {
-		t.Fatalf("workspace requests = %d, want 2", requests["/workspace"])
+	if requests["/workspace"] != 1 {
+		t.Fatalf("workspace requests = %d, want 1", requests["/workspace"])
 	}
 	if requests["/workspace/fetch/"+workspaceOne] != 1 {
 		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceOne, requests["/workspace/fetch/"+workspaceOne])
 	}
 	if requests["/workspace/fetch/"+workspaceTwo] != 1 {
 		t.Fatalf("workspace/fetch/%s calls = %d, want 1", workspaceTwo, requests["/workspace/fetch/"+workspaceTwo])
+	}
+}
+
+func TestGetProjectLogsToolRetriesWithoutWorkspaceAfterServerError(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceUUID := "911bceb5-3a2d-4154-93b3-33033dcafbb3"
+	projectUUID := "b825bf8f-5b23-4697-bf34-07d2f22a0bbc"
+	client, err := pipeops.NewClient("https://api.pipeops.test", pipeops.WithMaxRetries(0))
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceUUID+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/logs/"+projectUUID:
+				if got := r.URL.Query().Get("limit"); got != "100" {
+					t.Fatalf("limit = %q, want %q", got, "100")
+				}
+				if got := r.URL.Query().Get("workspace_uuid"); got == workspaceUUID {
+					return jsonHTTPResponse(r, http.StatusInternalServerError, `{"message":"internal server error"}`), nil
+				}
+				if got := r.URL.Query().Get("workspace_uuid"); got != "" {
+					t.Fatalf("workspace_uuid = %q, want empty or %q", got, workspaceUUID)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":[{"message":"logs without workspace scope"}]}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getProjectLogsTool(context.Background(), map[string]interface{}{"project_id": projectUUID, "workspace_id": workspaceUUID, "limit": 100})
+	if err != nil {
+		t.Fatalf("getProjectLogsTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if requests["/workspace"] != 1 {
+		t.Fatalf("workspace requests = %d, want 1", requests["/workspace"])
+	}
+	if requests["/project/logs/"+projectUUID] != 2 {
+		t.Fatalf("project/logs/%s calls = %d, want 2", projectUUID, requests["/project/logs/"+projectUUID])
 	}
 }
 

@@ -415,3 +415,58 @@ func TestLinkVCSProviderToolUsesRedirectPath(t *testing.T) {
 		t.Fatal("Expected result")
 	}
 }
+
+func TestListAddOnCategoriesToolNormalizesArrayResponse(t *testing.T) {
+	t.Parallel()
+
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want %s", r.Method, http.MethodGet)
+			}
+			if r.URL.Path != "/addons/categories" {
+				t.Fatalf("path = %s, want %s", r.URL.Path, "/addons/categories")
+			}
+			return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":[{"id":"cat-1","name":"Databases"}]}`), nil
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listAddOnCategoriesTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("listAddOnCategoriesTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	categories, ok := data["categories"].([]interface{})
+	if !ok {
+		t.Fatalf("Expected categories list, got %v", data["categories"])
+	}
+	if len(categories) != 1 {
+		t.Fatalf("categories len = %d, want %d", len(categories), 1)
+	}
+}
