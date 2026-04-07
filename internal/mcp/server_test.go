@@ -309,6 +309,20 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		t.Error("Expected get_billing_info to expose workspace_id override")
 	}
 
+	getBalance := toolByName["get_balance"]
+	if _, ok := getBalance.InputSchema["required"]; ok {
+		t.Error("Did not expect get_balance to require arguments")
+	}
+
+	getBalanceProperties, ok := getBalance.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected get_balance properties schema")
+	}
+
+	if _, ok := getBalanceProperties["workspace_id"]; !ok {
+		t.Error("Expected get_balance to expose workspace_id override")
+	}
+
 	listSubscriptions := toolByName["list_subscriptions"]
 	if _, ok := listSubscriptions.InputSchema["required"]; ok {
 		t.Error("Did not expect list_subscriptions to require arguments")
@@ -3113,6 +3127,104 @@ func TestGetBillingInfoToolAllowsMissingCurrentSubscription(t *testing.T) {
 	}
 	if requests["/workspace"] != 1 {
 		t.Fatalf("workspace requests = %d, want 1", requests["/workspace"])
+	}
+}
+
+func TestGetBalanceToolUsesWorkspaceFallback(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceUUID := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch r.URL.Path {
+			case "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"uuid":"`+workspaceUUID+`"}]}`), nil
+			case "/billing/balance":
+				if got := r.URL.Query().Get("workspace_uuid"); got == "" {
+					return jsonHTTPResponse(r, http.StatusBadRequest, `{"message":"workspace required for billing access"}`), nil
+				} else if got != workspaceUUID {
+					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":{"Balance":"12.50","Currency":"USD"},"message":"ok","success":true}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getBalanceTool(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("getBalanceTool error: %v", err)
+	}
+
+	payload := decodeToolJSONResult(t, result)
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	if got := data["balance"]; got != 12.5 {
+		t.Fatalf("balance = %v, want %v", got, 12.5)
+	}
+	if got := data["currency"]; got != "USD" {
+		t.Fatalf("currency = %v, want %v", got, "USD")
+	}
+	if requests["/workspace"] != 1 {
+		t.Fatalf("workspace requests = %d, want 1", requests["/workspace"])
+	}
+	if requests["/billing/balance"] != 2 {
+		t.Fatalf("billing/balance requests = %d, want 2", requests["/billing/balance"])
+	}
+}
+
+func TestGetBalanceToolUsesExplicitWorkspaceOverride(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceUUID := "5877a4ae-a891-49de-909d-0221f5eefc95"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch r.URL.Path {
+			case "/workspace":
+				t.Fatalf("unexpected workspace lookup")
+				return nil, nil
+			case "/billing/balance":
+				if got := r.URL.Query().Get("workspace_uuid"); got != workspaceUUID {
+					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":{"Balance":"7.25","Currency":"USD"},"message":"ok","success":true}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getBalanceTool(context.Background(), map[string]interface{}{"workspace_id": workspaceUUID})
+	if err != nil {
+		t.Fatalf("getBalanceTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+	if requests["/workspace"] != 0 {
+		t.Fatalf("workspace requests = %d, want 0", requests["/workspace"])
+	}
+	if requests["/billing/balance"] != 1 {
+		t.Fatalf("billing/balance requests = %d, want 1", requests["/billing/balance"])
 	}
 }
 

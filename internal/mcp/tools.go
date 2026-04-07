@@ -928,7 +928,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			tool: Tool{
 				Name:        "get_balance",
 				Description: "Get the current account balance",
-				InputSchema: emptySchema(),
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}),
 			},
 			handler: s.getBalanceTool,
 		},
@@ -4989,12 +4991,22 @@ func (s *Server) getBillingPortalURLTool(ctx context.Context, _ map[string]inter
 	return jsonResult(resp)
 }
 
-func (s *Server) getBalanceTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.Billing.GetBalance(ctx)
+func (s *Server) getBalanceTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	resp, err := s.requestBillingJSONWithWorkspaceFallback(ctx, http.MethodGet, "billing/balance", args, nil, nil)
 	if err != nil {
 		return nil, err
 	}
-	return jsonResult(resp)
+
+	payload, err := json.Marshal(resp)
+	if err != nil {
+		return nil, err
+	}
+
+	var balanceResp pipeops.BalanceResponse
+	if err := json.Unmarshal(payload, &balanceResp); err != nil {
+		return nil, err
+	}
+	return jsonResult(balanceResp)
 }
 
 func (s *Server) listWorkspaceCardsTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
