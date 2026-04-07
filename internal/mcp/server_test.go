@@ -474,6 +474,9 @@ func TestHandleToolsListSchemas(t *testing.T) {
 	if _, ok := getClusterCostAllocationProperties["window"]; !ok {
 		t.Error("Expected get_cluster_cost_allocation to expose window option")
 	}
+	if _, ok := getClusterCostAllocationProperties["location"]; !ok {
+		t.Error("Expected get_cluster_cost_allocation to expose location option")
+	}
 
 	deployProjectFromImage := toolByName["deploy_project_from_image"]
 	deployProjectFromImageRequired, ok := deployProjectFromImage.InputSchema["required"].([]string)
@@ -1875,6 +1878,101 @@ func TestGetClusterCostAllocationToolRetriesAcrossWorkspaceCandidates(t *testing
 	}
 	if attemptedWorkspaceUUIDs[1] != workspaceTwo {
 		t.Fatalf("second workspace_uuid = %q, want %q", attemptedWorkspaceUUIDs[1], workspaceTwo)
+	}
+}
+
+func TestGetClusterCostAllocationToolFallsBackToNovaRoute(t *testing.T) {
+	t.Parallel()
+
+	requests := map[string]int{}
+	workspaceUUID := "19760294-75eb-4dae-adcb-899277e2f9a4"
+	clusterUUID := "58af53f2-b440-49c6-97c5-006453d163a4"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			requests[r.URL.Path]++
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+workspaceUUID+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceUUID:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"CountryCode":"NG","Clusters":[{"uuid":"`+clusterUUID+`","name":"nova-cluster"}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/cluster/"+clusterUUID+"/cost/allocation/compute":
+				if got := r.URL.Query().Get("workspace_uuid"); got != workspaceUUID {
+					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
+				}
+				if got := r.URL.Query().Get("aggregate"); got != "namespace" {
+					t.Fatalf("aggregate = %q, want %q", got, "namespace")
+				}
+				if got := r.URL.Query().Get("window"); got != "30d" {
+					t.Fatalf("window = %q, want %q", got, "30d")
+				}
+				return jsonHTTPResponse(r, http.StatusBadRequest, `{"message":"error fetching cost alloction"}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/cluster/cost/allocation/compute":
+				if got := r.URL.Query().Get("workspace_uuid"); got != workspaceUUID {
+					t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
+				}
+				if got := r.URL.Query().Get("aggregate"); got != "namespace" {
+					t.Fatalf("aggregate = %q, want %q", got, "namespace")
+				}
+				if got := r.URL.Query().Get("window"); got != "30d" {
+					t.Fatalf("window = %q, want %q", got, "30d")
+				}
+				if got := r.URL.Query().Get("cluster"); got != clusterUUID {
+					t.Fatalf("cluster = %q, want %q", got, clusterUUID)
+				}
+				if got := r.URL.Query().Get("location"); got != "NGR" {
+					t.Fatalf("location = %q, want %q", got, "NGR")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"total":{"totalCost":9.87}}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getClusterCostAllocationTool(context.Background(), map[string]interface{}{"cluster_id": clusterUUID})
+	if err != nil {
+		t.Fatalf("getClusterCostAllocationTool error: %v", err)
+	}
+
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected result map, got %T", result)
+	}
+	content, ok := resultMap["content"].([]interface{})
+	if !ok || len(content) != 1 {
+		t.Fatalf("Expected single content item, got %v", resultMap["content"])
+	}
+	textContent, ok := content[0].(map[string]interface{})["text"].(string)
+	if !ok {
+		t.Fatalf("Expected text content, got %v", content[0])
+	}
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	costs, ok := data["costs"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected costs map, got %v", data["costs"])
+	}
+	if got := costs["totalCost"]; got != 9.87 {
+		t.Fatalf("totalCost = %v, want %v", got, 9.87)
+	}
+	if requests["/cluster/"+clusterUUID+"/cost/allocation/compute"] != 1 {
+		t.Fatalf("cluster/%s/cost/allocation/compute calls = %d, want 1", clusterUUID, requests["/cluster/"+clusterUUID+"/cost/allocation/compute"])
+	}
+	if requests["/cluster/cost/allocation/compute"] != 1 {
+		t.Fatalf("cluster/cost/allocation/compute calls = %d, want 1", requests["/cluster/cost/allocation/compute"])
 	}
 }
 

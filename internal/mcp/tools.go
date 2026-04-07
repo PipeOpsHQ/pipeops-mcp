@@ -335,6 +335,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
 					"aggregate":    stringProperty("Optional cost aggregation, defaults to namespace"),
 					"window":       stringProperty("Optional time window such as 30d, defaults to 30d"),
+					"location":     stringProperty("Optional billing location such as NGR or USA, used for nova server cost fallback"),
 				}, "cluster_id"),
 			},
 			handler: s.getClusterCostAllocationTool,
@@ -1150,6 +1151,25 @@ func withClusterCostAllocationQuery(path, workspaceUUID, aggregate, window strin
 		"workspace_uuid": workspaceUUID,
 		"aggregate":      aggregate,
 		"window":         window,
+	})
+}
+
+func withNovaClusterCostAllocationQuery(path, workspaceUUID, aggregate, window, clusterID, location string) string {
+	aggregate = strings.TrimSpace(aggregate)
+	if aggregate == "" {
+		aggregate = "namespace"
+	}
+	window = strings.TrimSpace(window)
+	if window == "" {
+		window = "30d"
+	}
+	location = normalizeCostLocation(location)
+	return withQueryValues(path, map[string]string{
+		"workspace_uuid": workspaceUUID,
+		"aggregate":      aggregate,
+		"window":         window,
+		"cluster":        clusterID,
+		"location":       location,
 	})
 }
 
@@ -1981,7 +2001,7 @@ func normalizeCluster(cluster map[string]interface{}, workspace map[string]inter
 		base = nested
 	}
 
-	normalized := make(map[string]interface{}, len(cluster)+len(base)+4)
+	normalized := make(map[string]interface{}, len(cluster)+len(base)+6)
 	for key, value := range cluster {
 		normalized[key] = value
 	}
@@ -2013,6 +2033,20 @@ func normalizeCluster(cluster map[string]interface{}, workspace map[string]inter
 			normalized["WorkspaceUUID"] = workspaceUUID
 		} else if workspaceUUID := extractString(lookupValue(workspace, "UUID", "uuid")); workspaceUUID != "" {
 			normalized["WorkspaceUUID"] = workspaceUUID
+		}
+	}
+	if _, ok := normalized["Location"]; !ok {
+		if location := extractLocationValue(base); location != "" {
+			normalized["Location"] = location
+		} else if location := extractLocationValue(workspace); location != "" {
+			normalized["Location"] = location
+		}
+	}
+	if _, ok := normalized["CountryCode"]; !ok {
+		if countryCode := extractString(lookupValue(base, "CountryCode", "country_code")); countryCode != "" {
+			normalized["CountryCode"] = countryCode
+		} else if countryCode := extractString(lookupValue(workspace, "CountryCode", "country_code")); countryCode != "" {
+			normalized["CountryCode"] = countryCode
 		}
 	}
 	return normalized
@@ -2109,6 +2143,67 @@ func clusterWorkspaceUUID(cluster map[string]interface{}, workspace workspaceRef
 		}
 	}
 	return ""
+}
+
+func normalizeCostLocation(value string) string {
+	trimmed := strings.ToUpper(strings.TrimSpace(value))
+	switch trimmed {
+	case "":
+		return ""
+	case "NG", "NGA", "NGR":
+		return "NGR"
+	case "US", "USA":
+		return "USA"
+	default:
+		return trimmed
+	}
+}
+
+func extractLocationValue(payload map[string]interface{}) string {
+	if payload == nil {
+		return ""
+	}
+	for _, key := range []string{"Location", "location", "CountryCode", "country_code", "Country", "country"} {
+		if value := normalizeCostLocation(extractString(lookupValue(payload, key))); value != "" {
+			return value
+		}
+	}
+	for _, key := range []string{"User", "user", "Owner", "owner"} {
+		nested, ok := lookupValue(payload, key).(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if value := extractLocationValue(nested); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func normalizeClusterCostResponse(resp map[string]interface{}) map[string]interface{} {
+	data, ok := resp["data"].(map[string]interface{})
+	if !ok {
+		return resp
+	}
+	if _, ok := data["costs"]; ok {
+		return resp
+	}
+	if total, ok := data["total"]; ok {
+		data["costs"] = total
+	}
+	return resp
+}
+
+func isClusterCostAllocationFetchError(err error) bool {
+	var apiErr *pipeops.ErrorResponse
+	if !errors.As(err, &apiErr) || apiErr.Response == nil {
+		return false
+	}
+	if apiErr.Response.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(apiErr.Message))
+	return strings.Contains(message, "error fetching cost alloction") || strings.Contains(message, "error fetching cost allocation")
 }
 
 func (s *Server) fetchClustersForWorkspaceReference(ctx context.Context, workspace workspaceReference) ([]map[string]interface{}, string, string, error) {
@@ -2973,6 +3068,7 @@ func (s *Server) getClusterCostAllocationTool(ctx context.Context, args map[stri
 	workspaceID, _ := args["workspace_id"].(string)
 	aggregate, _ := args["aggregate"].(string)
 	window, _ := args["window"].(string)
+	location, _ := args["location"].(string)
 
 	resolvedClusterID := clusterID
 	candidateWorkspaceUUIDs := make([]string, 0, 2)
@@ -3005,6 +3101,9 @@ func (s *Server) getClusterCostAllocationTool(ctx context.Context, args map[stri
 			path = fmt.Sprintf("cluster/%s/cost/allocation/compute", resolvedClusterID)
 		}
 		candidateWorkspaceUUIDs = appendUniqueString(candidateWorkspaceUUIDs, clusterWorkspaceUUID(cluster, workspace))
+		if strings.TrimSpace(location) == "" {
+			location = extractLocationValue(cluster)
+		}
 	}
 
 	tryWorkspaceCandidates := func(workspaceUUIDs []string) (interface{}, error) {
@@ -3021,7 +3120,18 @@ func (s *Server) getClusterCostAllocationTool(ctx context.Context, args map[stri
 
 			resp, requestErr := s.requestJSON(ctx, http.MethodGet, withClusterCostAllocationQuery(path, workspaceUUID, aggregate, window), nil)
 			if requestErr == nil {
-				return jsonResult(resp)
+				return jsonResult(normalizeClusterCostResponse(resp))
+			}
+			if isClusterCostAllocationFetchError(requestErr) {
+				fallbackResp, fallbackErr := s.requestJSON(ctx, http.MethodGet, withNovaClusterCostAllocationQuery("cluster/cost/allocation/compute", workspaceUUID, aggregate, window, resolvedClusterID, location), nil)
+				if fallbackErr == nil {
+					return jsonResult(normalizeClusterCostResponse(fallbackResp))
+				}
+				if !isWorkspaceProjectsFallbackError(fallbackErr) && !isClusterCostAllocationFetchError(fallbackErr) {
+					return nil, fallbackErr
+				}
+				lastErr = fallbackErr
+				continue
 			}
 			if !isWorkspaceProjectsFallbackError(requestErr) {
 				return nil, requestErr
