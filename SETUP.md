@@ -34,17 +34,22 @@ go install github.com/PipeOpsHQ/pipeops-mcp-server/cmd/pipeops-mcp-server@latest
 
 You need to authenticate with PipeOps. There are two methods:
 
-### Method 1: API Token (Recommended)
+### Method 1: Service / API Token (Recommended)
+
+Use a **workspace service token** (`sat_…`) with platform scopes (`api:full` or `preset: platform`).
 
 1. Log in to your PipeOps dashboard
-2. Navigate to Settings > API Tokens
-3. Create a new API token
+2. Navigate to **Integrations → Service Tokens**
+3. Create a token (preset **platform** / scopes `api:full`)
 4. Copy the token (you won't be able to see it again)
 5. Set the environment variable:
 
 ```bash
-export PIPEOPS_TOKEN="your-api-token-here"
+export PIPEOPS_TOKEN="sat_…"
+export PIPEOPS_BASE_URL="https://api.pipeops.io"   # optional override
 ```
+
+See also: controller docs `docs/service-tokens.md`.
 
 ### Method 2: Email/Password
 

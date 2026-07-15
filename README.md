@@ -23,8 +23,8 @@ go install github.com/PipeOpsHQ/pipeops-mcp-server/cmd/pipeops-mcp-server@latest
 
 The server requires authentication via either:
 
-1. **Email/Password**: Set `PIPEOPS_EMAIL` and `PIPEOPS_PASSWORD` environment variables
-2. **API Token**: Set `PIPEOPS_TOKEN` environment variable
+1. **Service / API Token (recommended)**: Set `PIPEOPS_TOKEN` to a workspace service token (`sat_…`) with `api:full` (Integrations → Service Tokens → platform preset)
+2. **Email/Password**: Set `PIPEOPS_EMAIL` and `PIPEOPS_PASSWORD` environment variables
 
 Optional configuration:
 - `PIPEOPS_BASE_URL`: PipeOps API base URL (default: https://api.pipeops.io)
