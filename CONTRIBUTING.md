@@ -5,7 +5,7 @@ Thank you for your interest in contributing to the PipeOps MCP Server!
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/pipeops-mcp-server.git`
+2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/pipeops-mcp.git`
 3. Create a feature branch: `git checkout -b feature/my-new-feature`
 4. Make your changes
 5. Run tests: `make test`
@@ -25,8 +25,8 @@ Thank you for your interest in contributing to the PipeOps MCP Server!
 
 ```bash
 # Clone the repository
-git clone https://github.com/PipeOpsHQ/pipeops-mcp-server.git
-cd pipeops-mcp-server
+git clone https://github.com/PipeOpsHQ/pipeops-mcp.git
+cd pipeops-mcp
 
 # Install dependencies
 go mod download

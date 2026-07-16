@@ -852,6 +852,6 @@ The PipeOps API has rate limits. The MCP server handles retries automatically, b
 ## Support
 
 For issues or questions:
-- GitHub Issues: https://github.com/PipeOpsHQ/pipeops-mcp-server/issues
+- GitHub Issues: https://github.com/PipeOpsHQ/pipeops-mcp/issues
 - PipeOps Documentation: https://docs.pipeops.io
 - PipeOps Support: support@pipeops.io
