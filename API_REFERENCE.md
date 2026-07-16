@@ -234,6 +234,8 @@ Trigger a deployment for a project.
 
 **Arguments:**
 - `project_id` (string, required): The project ID to deploy
+- `workspace_id` (string, optional): Workspace ID or UUID override
+- `no_cache` (boolean, optional): Force a clean rebuild without cached build layers
 
 **Example:**
 ```
