@@ -16,14 +16,18 @@ Model Context Protocol (MCP) server for interacting with PipeOps platform.
 ## Installation
 
 ```bash
+go install github.com/PipeOpsHQ/pipeops-mcp/cmd/pipeops-mcp-server@latest
+```
+
+The binary is installed at `$(go env GOPATH)/bin/pipeops-mcp-server`.
+
+To install from source instead:
+
+```bash
 git clone https://github.com/PipeOpsHQ/pipeops-mcp.git
 cd pipeops-mcp
 go install ./cmd/pipeops-mcp-server
 ```
-
-The binary is installed at `$(go env GOPATH)/bin/pipeops-mcp-server`. Direct
-`go install ...@latest` installation is not currently available because the
-published Go module path does not match the repository path.
 
 ## Configuration
 

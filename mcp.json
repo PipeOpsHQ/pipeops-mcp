@@ -13,7 +13,7 @@
   "runtime": {
     "type": "binary",
     "install": {
-      "go": "go install github.com/PipeOpsHQ/pipeops-mcp-server/cmd/pipeops-mcp-server@latest"
+      "go": "go install github.com/PipeOpsHQ/pipeops-mcp/cmd/pipeops-mcp-server@latest"
     },
     "command": "pipeops-mcp-server"
   },

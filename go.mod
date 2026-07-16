@@ -1,4 +1,4 @@
-module github.com/PipeOpsHQ/pipeops-mcp-server
+module github.com/PipeOpsHQ/pipeops-mcp
 
 go 1.23.3
 
