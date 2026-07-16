@@ -16,8 +16,14 @@ Model Context Protocol (MCP) server for interacting with PipeOps platform.
 ## Installation
 
 ```bash
-go install github.com/PipeOpsHQ/pipeops-mcp-server/cmd/pipeops-mcp-server@latest
+git clone https://github.com/PipeOpsHQ/pipeops-mcp.git
+cd pipeops-mcp
+go install ./cmd/pipeops-mcp-server
 ```
+
+The binary is installed at `$(go env GOPATH)/bin/pipeops-mcp-server`. Direct
+`go install ...@latest` installation is not currently available because the
+published Go module path does not match the repository path.
 
 ## Configuration
 
@@ -50,6 +56,20 @@ Add to your Claude Desktop configuration file:
   }
 }
 ```
+
+### With Codex
+
+Set your workspace service token and register the installed server:
+
+```bash
+export PIPEOPS_TOKEN="sat_your_token_here"
+codex mcp add pipeops \
+  --env PIPEOPS_TOKEN="$PIPEOPS_TOKEN" \
+  -- "$(go env GOPATH)/bin/pipeops-mcp-server"
+codex mcp list
+```
+
+Start a new Codex task after registering the server so its tools are loaded.
 
 ### Standalone
 
@@ -248,8 +268,8 @@ pipeops-mcp-server
 
 ```bash
 # Clone repository
-git clone https://github.com/PipeOpsHQ/pipeops-mcp-server
-cd pipeops-mcp-server
+git clone https://github.com/PipeOpsHQ/pipeops-mcp
+cd pipeops-mcp
 
 # Install dependencies
 go mod download

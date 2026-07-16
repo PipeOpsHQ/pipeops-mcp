@@ -625,9 +625,10 @@ What add-ons can I use?
 
 ### list_service_account_tokens
 
-List service account tokens for the current account or workspace context.
+List service account tokens for a workspace. When `workspace_id` is omitted, the first accessible workspace is used.
 
-**Arguments:** None
+**Arguments:**
+- `workspace_id` (string, optional): Workspace ID or UUID override
 
 **Example:**
 ```
@@ -851,6 +852,6 @@ The PipeOps API has rate limits. The MCP server handles retries automatically, b
 ## Support
 
 For issues or questions:
-- GitHub Issues: https://github.com/PipeOpsHQ/pipeops-mcp-server/issues
+- GitHub Issues: https://github.com/PipeOpsHQ/pipeops-mcp/issues
 - PipeOps Documentation: https://docs.pipeops.io
 - PipeOps Support: support@pipeops.io

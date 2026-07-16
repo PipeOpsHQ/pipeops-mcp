@@ -4,18 +4,14 @@ Get up and running with PipeOps MCP Server in under 5 minutes!
 
 ## Step 1: Install
 
-Choose your preferred installation method:
+Install from source. Direct `go install ...@latest` installation is not
+currently available because the published Go module path does not match the
+repository path.
 
-### Using Go
 ```bash
-go install github.com/PipeOpsHQ/pipeops-mcp-server/cmd/pipeops-mcp-server@latest
-```
-
-### From Source
-```bash
-git clone https://github.com/PipeOpsHQ/pipeops-mcp-server.git
-cd pipeops-mcp-server
-make install
+git clone https://github.com/PipeOpsHQ/pipeops-mcp.git
+cd pipeops-mcp
+go install ./cmd/pipeops-mcp-server
 ```
 
 ## Step 2: Get Your API Token
@@ -93,8 +89,8 @@ What servers do I have?
 
 ## Need Help?
 
-- 🐛 [Report Issues](https://github.com/PipeOpsHQ/pipeops-mcp-server/issues)
-- 💬 [Discussions](https://github.com/PipeOpsHQ/pipeops-mcp-server/discussions)
+- 🐛 [Report Issues](https://github.com/PipeOpsHQ/pipeops-mcp/issues)
+- 💬 [Discussions](https://github.com/PipeOpsHQ/pipeops-mcp/discussions)
 - 📧 support@pipeops.io
 
 ---

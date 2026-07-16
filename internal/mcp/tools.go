@@ -979,7 +979,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			tool: Tool{
 				Name:        "list_service_account_tokens",
 				Description: "List service account tokens",
-				InputSchema: emptySchema(),
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}),
 			},
 			handler: s.listServiceAccountTokensTool,
 		},
@@ -1182,28 +1184,6 @@ func normalizeVCSProvider(provider string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported provider %q", provider)
 	}
-}
-
-func (s *Server) resolveWorkspaceID(ctx context.Context, args map[string]interface{}) (string, error) {
-	if workspaceID, ok := args["workspace_id"].(string); ok && workspaceID != "" {
-		return workspaceID, nil
-	}
-
-	resp, _, err := s.client.Workspaces.List(ctx)
-	if err != nil {
-		return "", err
-	}
-	if len(resp.Data.Workspaces) == 1 {
-		workspace := resp.Data.Workspaces[0]
-		if workspace.UUID != "" {
-			return workspace.UUID, nil
-		}
-		if workspace.ID != "" {
-			return workspace.ID, nil
-		}
-	}
-
-	return "", fmt.Errorf("workspace_id is required")
 }
 
 func (s *Server) resolveDefaultWorkspaceID(ctx context.Context, args map[string]interface{}) (string, error) {
@@ -1987,10 +1967,6 @@ type externalRegistryListArgs struct {
 	Limit       int    `json:"limit,omitempty"`
 }
 
-type externalRegistryArgs struct {
-	RegistryID string `json:"registry_id"`
-}
-
 type externalRegistryBrowseArgs struct {
 	RegistryID string `json:"registry_id"`
 	Page       int    `json:"page,omitempty"`
@@ -2016,10 +1992,6 @@ type publicRegistryTagsArgs struct {
 	Repository string `json:"repository"`
 	Page       int    `json:"page,omitempty"`
 	Limit      int    `json:"limit,omitempty"`
-}
-
-type cloudProviderArgs struct {
-	CloudProvider string `json:"cloud_provider"`
 }
 
 type cloudProviderInstanceTypesArgs struct {
@@ -5152,8 +5124,13 @@ func (s *Server) listInvoicesTool(ctx context.Context, _ map[string]interface{})
 	return jsonResult(normalizeCollectionResponse(resp, "invoices"))
 }
 
-func (s *Server) listServiceAccountTokensTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.ServiceTokens.ListServiceAccountTokens(ctx)
+func (s *Server) listServiceAccountTokensTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.requestJSON(ctx, http.MethodGet, withWorkspaceUUIDQuery("api/v1/service-account-tokens", workspaceUUID), nil)
 	if err != nil {
 		return nil, err
 	}

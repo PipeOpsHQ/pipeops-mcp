@@ -14,8 +14,8 @@ This guide will help you set up and configure the PipeOps MCP Server for use wit
 
 ```bash
 # Clone the repository
-git clone https://github.com/PipeOpsHQ/pipeops-mcp-server.git
-cd pipeops-mcp-server
+git clone https://github.com/PipeOpsHQ/pipeops-mcp.git
+cd pipeops-mcp
 
 # Build and install
 make install
@@ -24,11 +24,9 @@ make install
 make build
 ```
 
-### Option 2: Using Go install
-
-```bash
-go install github.com/PipeOpsHQ/pipeops-mcp-server/cmd/pipeops-mcp-server@latest
-```
+The repository URL is `https://github.com/PipeOpsHQ/pipeops-mcp.git`. Direct
+`go install ...@latest` installation is not currently available because the
+published Go module path does not match the repository path.
 
 ## Authentication Setup
 
@@ -282,7 +280,7 @@ You can configure different PipeOps environments:
 ## Getting Help
 
 - **Documentation**: See [README.md](README.md) for detailed API documentation
-- **Issues**: Report bugs on [GitHub Issues](https://github.com/PipeOpsHQ/pipeops-mcp-server/issues)
+- **Issues**: Report bugs on [GitHub Issues](https://github.com/PipeOpsHQ/pipeops-mcp/issues)
 - **Contributing**: See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines
 
 ## Next Steps

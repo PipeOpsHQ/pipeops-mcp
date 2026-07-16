@@ -35,4 +35,4 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Secure credential handling via environment variables
 - No credentials stored in code or configuration files
 
-[1.0.0]: https://github.com/PipeOpsHQ/pipeops-mcp-server/releases/tag/v1.0.0
+[1.0.0]: https://github.com/PipeOpsHQ/pipeops-mcp/releases/tag/v1.0.0
