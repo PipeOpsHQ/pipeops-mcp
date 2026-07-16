@@ -625,9 +625,10 @@ What add-ons can I use?
 
 ### list_service_account_tokens
 
-List service account tokens for the current account or workspace context.
+List service account tokens for a workspace. When `workspace_id` is omitted, the first accessible workspace is used.
 
-**Arguments:** None
+**Arguments:**
+- `workspace_id` (string, optional): Workspace ID or UUID override
 
 **Example:**
 ```

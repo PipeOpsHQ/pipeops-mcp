@@ -979,7 +979,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			tool: Tool{
 				Name:        "list_service_account_tokens",
 				Description: "List service account tokens",
-				InputSchema: emptySchema(),
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}),
 			},
 			handler: s.listServiceAccountTokensTool,
 		},
@@ -5152,8 +5154,13 @@ func (s *Server) listInvoicesTool(ctx context.Context, _ map[string]interface{})
 	return jsonResult(normalizeCollectionResponse(resp, "invoices"))
 }
 
-func (s *Server) listServiceAccountTokensTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.ServiceTokens.ListServiceAccountTokens(ctx)
+func (s *Server) listServiceAccountTokensTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := s.requestJSON(ctx, http.MethodGet, withWorkspaceUUIDQuery("api/v1/service-account-tokens", workspaceUUID), nil)
 	if err != nil {
 		return nil, err
 	}
