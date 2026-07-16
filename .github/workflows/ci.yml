@@ -40,6 +40,9 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      - name: Verify module path
+        run: test "$(go list -m)" = "github.com/PipeOpsHQ/pipeops-mcp"
+
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
 

@@ -8,7 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/PipeOpsHQ/pipeops-mcp-server/internal/mcp"
+	"github.com/PipeOpsHQ/pipeops-mcp/internal/mcp"
 )
 
 func main() {
