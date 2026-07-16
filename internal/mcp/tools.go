@@ -106,7 +106,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				Name:        "deploy_project",
 				Description: "Trigger a deployment for a project",
 				InputSchema: objectSchema(map[string]interface{}{
-					"project_id": stringProperty("The project ID or UUID to deploy"),
+					"project_id":   stringProperty("The project ID or UUID to deploy"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+					"no_cache":     booleanProperty("Force a clean rebuild without cached build layers"),
 				}, "project_id"),
 			},
 			handler: s.deployProjectTool,
@@ -3327,7 +3329,24 @@ func (s *Server) deployProjectTool(ctx context.Context, args map[string]interfac
 		return nil, err
 	}
 
-	if _, err := s.client.Projects.Deploy(ctx, projectID); err != nil {
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w", err)
+	}
+
+	noCache := false
+	if value, ok := args["no_cache"]; ok {
+		var valid bool
+		noCache, valid = value.(bool)
+		if !valid {
+			return nil, fmt.Errorf("no_cache must be a boolean")
+		}
+	}
+
+	if _, err := s.client.Projects.Deploy(ctx, projectID, &pipeops.ProjectDeployOptions{
+		WorkspaceUUID: workspaceUUID,
+		NoCache:       noCache,
+	}); err != nil {
 		return nil, err
 	}
 	return textResult("Deployment triggered successfully"), nil

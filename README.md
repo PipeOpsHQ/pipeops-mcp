@@ -198,7 +198,9 @@ pipeops-mcp-server
 {
   "name": "deploy_project",
   "arguments": {
-    "project_id": "proj_abc123"
+    "project_id": "proj_abc123",
+    "workspace_id": "workspace_abc123",
+    "no_cache": false
   }
 }
 ```
