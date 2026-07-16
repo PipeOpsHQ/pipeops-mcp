@@ -1,5 +1,5 @@
-github.com/PipeOpsHQ/pipeops-go-sdk v0.12.7 h1:DUd6WJdwQlnC456hvt1BysDHa0ZdMjiPhEVNtbgS3MU=
-github.com/PipeOpsHQ/pipeops-go-sdk v0.12.7/go.mod h1:06tq3WBPqAYhzmRErIlN6GMFN+jxDinMUDThl5DrM7E=
+github.com/PipeOpsHQ/pipeops-go-sdk v0.12.8 h1:gx9kPD6eACDjTAn8hmf/sz9+6yt9MbLmeRf2+NtkFLo=
+github.com/PipeOpsHQ/pipeops-go-sdk v0.12.8/go.mod h1:06tq3WBPqAYhzmRErIlN6GMFN+jxDinMUDThl5DrM7E=
 github.com/google/go-cmp v0.6.0 h1:ofyhxvXcZhMsU5ulbFiLKl/XBFqE1GSq7atu8tAmTRI=
 github.com/google/go-cmp v0.6.0/go.mod h1:17dUlkBOakJ0+DkrSSNjCkIjxS6bF9zb3elmeNGIjoY=
 github.com/google/go-querystring v1.2.0 h1:yhqkPbu2/OH+V9BfpCVPZkNmUXhb2gBxJArfhIxNtP0=
