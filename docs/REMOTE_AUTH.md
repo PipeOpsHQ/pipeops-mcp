@@ -1,91 +1,161 @@
 # Hosted MCP authentication
 
-## What the MCP server owns
+## Goals
 
-The hosted process runs the official Go MCP SDK over stateless Streamable HTTP.
-It provides:
+1. Keep **static Bearer** (`sat_*` / product tokens) working for Codex, Claude Code, Gemini CLI, VS Code, Windsurf, Zed, and Cursor builds that accept `bearer_token_env_var`.
+2. Add **first-class PipeOps OAuth 2.1** so Claude Desktop, ChatGPT custom MCP apps, Cursor OAuth, and Codex `mcp login` get browser login without pasting tokens.
+3. Optionally ship an **MCP-only OAuth bridge** (token paste → short-lived MCP tokens) behind a flag if Controller/Console work is delayed.
 
-- `POST`, `GET`, and `DELETE /mcp` through the Streamable HTTP transport
-- Bearer authentication for every `/mcp` request
-- online token validation through the existing PipeOps `GET /profile/data` API
-- a fresh PipeOps SDK client per request, preventing credentials from crossing callers
-- `GET /.well-known/oauth-protected-resource`
-- `GET /.well-known/oauth-protected-resource/mcp`
-- `401` responses with an OAuth protected-resource metadata challenge
-- read-only and destructive tool annotations
-- unauthenticated `GET /healthz`
-- the existing STDIO transport for local development and CI
+## What the MCP server owns today (Phase 1)
 
-Phase 1 accepts existing workspace service tokens (`sat_...`) and user product
-tokens. The authenticated token is passed to the controller for tool API calls.
-This is the agreed beta behavior; audience-bound OAuth tokens require the later
-exchange work described below.
+Hosted process: official Go MCP SDK, **stateless Streamable HTTP**.
 
-## Deploying the MCP service
+| Surface | Behavior |
+|---------|----------|
+| `POST` / `GET` / `DELETE /mcp` | Streamable HTTP; **Bearer required** |
+| Token validation | Online via PipeOps `GET /profile/data` |
+| Credential isolation | Fresh SDK client per request (token never shared across callers) |
+| `GET /.well-known/oauth-protected-resource` | Resource metadata |
+| `GET /.well-known/oauth-protected-resource/mcp` | Path-scoped resource metadata |
+| Unauthenticated `/mcp` | `401` + `WWW-Authenticate: Bearer resource_metadata="…"` |
+| `GET /healthz` | Unauthenticated health |
+| STDIO | Local dev / CI with `PIPEOPS_TOKEN` |
 
-Required runtime settings:
+Phase 1 accepts existing workspace service tokens (`sat_…`) and user product tokens and **forwards** them to the controller. Audience-bound MCP tokens + exchange are Phase 2c.
+
+### Critical discovery rule
+
+**Do not advertise an authorization server until that issuer serves complete AS metadata.**
+
+| Env | Effect |
+|-----|--------|
+| `PIPEOPS_OAUTH_ISSUER` **unset** (default) | `authorization_servers` is **empty**. Clients must use static Bearer. No broken browser login. |
+| `PIPEOPS_OAUTH_ISSUER=https://api.pipeops.io` | Advertise that issuer **only after** it serves `GET /.well-known/oauth-authorization-server` and live authorize/token endpoints. |
+
+Previously the server defaulted issuer to `https://api.pipeops.io` without AS discovery, so OAuth clients started a flow that could not finish. That default is removed.
+
+## Deploying the MCP service (Bearer available now)
 
 ```text
 PIPEOPS_TRANSPORT=http
 PIPEOPS_HTTP_ADDR=:8080
 PIPEOPS_BASE_URL=https://api.pipeops.io
 PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp
-PIPEOPS_OAUTH_ISSUER=https://api.pipeops.io
+# PIPEOPS_OAUTH_ISSUER=   # leave unset until first-class OAuth AS is ready
 ```
 
-Route `https://mcp.pipeops.app` to port 8080 and terminate TLS at the ingress or
-load balancer. Do not set a shared `PIPEOPS_TOKEN` in hosted mode; every customer
-supplies their own Bearer token. Use `/healthz` for health probes.
+Route `https://mcp.pipeops.app` → port 8080 (TLS at ingress). **Do not** set a shared `PIPEOPS_TOKEN` in hosted mode.
 
-Customer setup for Phase 1:
+### Customer setup — available now (Bearer)
 
 ```bash
-export PIPEOPS_TOKEN="sat_your_token_here"
+export PIPEOPS_TOKEN="sat_your_workspace_token"
 codex mcp add pipeops \
   --url https://mcp.pipeops.app/mcp \
   --bearer-token-env-var PIPEOPS_TOKEN
 ```
 
-## Controller handoff (no controller code is changed here)
+Compatible with any client that supports remote Streamable HTTP + Bearer env.
 
-Phase 1 needs no controller release. Existing product and service tokens only
-need to remain valid for `GET /profile/data` and the APIs their scopes permit.
+### Customer setup — after first-class OAuth
 
-For browser login with `codex mcp login pipeops`, the controller team needs to:
+```bash
+codex mcp add pipeops --url https://mcp.pipeops.app/mcp
+codex mcp login pipeops
+```
 
-1. Publish `GET /.well-known/oauth-authorization-server` for the existing PipeOps OAuth issuer.
-2. Pre-register a public `Codex MCP` client with PKCE S256 and Codex loopback redirect URIs, or add tightly constrained RFC 7591 dynamic registration.
-3. Confirm or add refresh-token support before advertising the `refresh_token` grant.
-4. Keep using the existing `/oauth/authorize` and `/oauth/token` implementation; do not create another authorization server.
-5. Later, bind approved scopes, workspace IDs, client ID, audience, and expiry to issued MCP tokens.
-6. For production audience isolation, add RFC 7662-style introspection and a short-lived controller-token exchange so the MCP stops forwarding the raw Codex token.
+(And equivalent Claude / Cursor / ChatGPT connector OAuth UIs.)
 
-The authorization-server issuer should be the public API base that actually
-serves `/oauth/token`. If a console URL is desired, proxy the same routes and
-keep one stable issuer.
+## Path 1 — First-class PipeOps OAuth (recommended)
 
-## Dashboard handoff (no dashboard code is changed here)
+Reuse the **existing** controller OAuth AS (CLI already uses `/oauth/authorize` + `/oauth/token` + PKCE). Do **not** build a second AS.
 
-For browser OAuth, the dashboard team needs to:
+### Controller (AS)
 
-1. Add a browser front door for the existing authorize request, preserving `state`, PKCE, scopes, resource, and redirect URI.
-2. Redirect back to the Codex loopback callback with the authorization code.
-3. Add explicit consent showing the app name, requested scope groups, and workspace selection.
-4. Allow approve/deny and send the approved scopes/workspaces to the controller consent endpoint once that endpoint exists.
+| Item | Status / work |
+|------|----------------|
+| `GET /.well-known/oauth-authorization-server` | Required before setting `PIPEOPS_OAUTH_ISSUER` |
+| `GET /oauth/authorize` | Exists (session JWT) |
+| `POST /oauth/token` | Exists (auth code + PKCE) |
+| PKCE S256 | Exists |
+| Refresh-token grant + rotation | Confirm/add before advertising `refresh_token` |
+| Dynamic client registration (`POST /oauth/register`) | Optional; or pre-register Claude/Cursor/Codex public clients |
+| Consent + workspace binding | Auto-approve today → explicit consent + `workspace_ids` |
+| Audience `aud=https://mcp.pipeops.app/mcp` | Required for MCP tokens |
+| Scopes | `pipeops:read`, `projects:write`, `deployments:write`, `addons:write`, `billing:write`, `tokens:admin` |
+| SA denylist / secret export | Preserve for exchanged credentials |
 
-Until these handoff items ship, customers should use the Phase 1 Bearer-token
-configuration. The MCP endpoint and its protected-resource discovery remain
-compatible with the later browser flow.
+### Dashboard (console)
+
+1. Browser front door for authorize (preserve `state`, PKCE, scopes, resource, redirect).
+2. Consent UI: app name, scope groups, **workspace selection**, approve/deny.
+3. Redirect to client callback with authorization code.
+
+### MCP (after AS is live)
+
+1. Set `PIPEOPS_OAUTH_ISSUER` to the real issuer (API base that serves AS metadata).
+2. Accept MCP access tokens (validate via introspect/JWT + audience).
+3. **Phase 2c:** exchange MCP token → short-lived controller credential (no passthrough of long-lived product tokens).
+
+## Path 2 — MCP-only OAuth bridge (interim, feature-flagged)
+
+If Controller/Console cannot ship yet, MCP can host a **temporary** AS on `mcp.pipeops.app`:
+
+1. Client runs OAuth against MCP.
+2. Secure page: customer pastes existing workspace service token.
+3. MCP validates token against PipeOps.
+4. MCP stores encrypted upstream token; issues short-lived audience-bound access + refresh to the AI client.
+5. Revocation deletes grant + stored credential.
+
+**Trade-offs:** still requires creating/pasting `sat_*`; MCP becomes a secret vault. Treat as bridge only (`PIPEOPS_MCP_OAUTH_BRIDGE=true`). Prefer Path 1.
+
+## Client matrix
+
+| Client | Available now (Bearer) | After PipeOps OAuth | Notes |
+|--------|------------------------|---------------------|--------|
+| Codex | Yes (`--bearer-token-env-var`) | `mcp login` | Bearer works today |
+| Claude Code / Gemini CLI / VS Code / Windsurf / Zed | Yes (Bearer env) | Yes when they use OAuth | |
+| Claude Desktop connectors | Limited | Yes | Often OAuth-only |
+| Cursor (Bearer-capable builds) | Yes | Yes | |
+| Cursor OAuth flow | No | Yes | Needs Path 1 or bridge |
+| ChatGPT custom MCP apps | No | Yes | Needs Path 1 or bridge |
+| Other RFC-compliant remote MCP | Bearer if supported | Yes | |
 
 ## Acceptance checks
 
+### Phase 1 (Bearer)
+
 ```bash
 curl -i https://mcp.pipeops.app/.well-known/oauth-protected-resource
+# authorization_servers must be [] or omitted until AS is ready
+
 curl -i https://mcp.pipeops.app/healthz
 curl -i -X POST https://mcp.pipeops.app/mcp
+# 401 + WWW-Authenticate resource_metadata=...
+
+curl -i -X POST https://mcp.pipeops.app/mcp \
+  -H "Authorization: Bearer $PIPEOPS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
 ```
 
-The unauthenticated MCP request must return `401` and a `WWW-Authenticate:
-Bearer ... resource_metadata=...` challenge. An authenticated MCP initialize
-request must succeed with an existing PipeOps token, and Codex must report
-`Auth: Bearer token` rather than `Auth: Unsupported`.
+Codex should report **Auth: Bearer token**, not Unsupported.
+
+### Before enabling OAuth issuer advertisement
+
+```bash
+curl -i https://api.pipeops.io/.well-known/oauth-authorization-server
+# must return valid AS metadata with authorize + token endpoints
+```
+
+Only then:
+
+```text
+PIPEOPS_OAUTH_ISSUER=https://api.pipeops.io
+```
+
+## Related docs
+
+- Controller handoff checklist: `pipeops-controller/docs/MCP_OAUTH_CONTROLLER_DELTA.md` (when present on develop)
+- Service tokens / dual-auth denylist: controller `docs/service-tokens.md`

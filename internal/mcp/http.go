@@ -19,7 +19,6 @@ import (
 const (
 	defaultBaseURL     = "https://api.pipeops.io"
 	defaultResourceURL = "https://mcp.pipeops.app/mcp"
-	defaultOAuthIssuer = "https://api.pipeops.io"
 	defaultHTTPAddr    = ":8080"
 	defaultMaxBodySize = int64(4 << 20)
 )
@@ -55,9 +54,10 @@ func LoadHTTPConfigFromEnv() HTTPConfig {
 	if config.ResourceURL == "" {
 		config.ResourceURL = defaultResourceURL
 	}
-	if config.AuthorizationServer == "" {
-		config.AuthorizationServer = defaultOAuthIssuer
-	}
+	// AuthorizationServer is intentionally NOT defaulted. Advertising an issuer
+	// that lacks AS metadata (e.g. bare api.pipeops.io) breaks OAuth-capable
+	// clients that discover a flow that cannot finish. Set PIPEOPS_OAUTH_ISSUER
+	// only when that host serves /.well-known/oauth-authorization-server.
 	if len(config.Scopes) == 0 {
 		config.Scopes = defaultMCPScopes()
 	}
@@ -72,17 +72,22 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := validatePublicURL("authorization server", config.AuthorizationServer); err != nil {
-		return nil, err
-	}
 	if _, err := validateAbsoluteURL("PipeOps API base URL", config.BaseURL); err != nil {
 		return nil, err
+	}
+
+	var authorizationServers []string
+	if issuer := strings.TrimSpace(config.AuthorizationServer); issuer != "" {
+		if _, err := validatePublicURL("authorization server", issuer); err != nil {
+			return nil, err
+		}
+		authorizationServers = []string{issuer}
 	}
 
 	metadataURL := resourceURL.Scheme + "://" + resourceURL.Host + "/.well-known/oauth-protected-resource"
 	metadata := &oauthex.ProtectedResourceMetadata{
 		Resource:               config.ResourceURL,
-		AuthorizationServers:   []string{config.AuthorizationServer},
+		AuthorizationServers:   authorizationServers,
 		ScopesSupported:        config.Scopes,
 		BearerMethodsSupported: []string{"header"},
 		ResourceName:           "PipeOps MCP Server",
@@ -129,9 +134,7 @@ func withHTTPDefaults(config HTTPConfig) HTTPConfig {
 	if config.ResourceURL == "" {
 		config.ResourceURL = defaultResourceURL
 	}
-	if config.AuthorizationServer == "" {
-		config.AuthorizationServer = defaultOAuthIssuer
-	}
+	// Do not invent an OAuth issuer default — see LoadHTTPConfigFromEnv.
 	if config.MaxBodyBytes <= 0 {
 		config.MaxBodyBytes = defaultMaxBodySize
 	}

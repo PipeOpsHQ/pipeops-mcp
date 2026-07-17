@@ -74,8 +74,10 @@ Hosted transport configuration:
 - `PIPEOPS_TRANSPORT=http` enables Streamable HTTP (default remains `stdio`)
 - `PIPEOPS_HTTP_ADDR=:8080` controls the listen address
 - `PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp` sets the OAuth resource URL
-- `PIPEOPS_OAUTH_ISSUER=https://api.pipeops.io` sets the existing PipeOps authorization-server issuer
+- `PIPEOPS_OAUTH_ISSUER` **optional** — only set when that issuer serves `/.well-known/oauth-authorization-server` (do **not** default to `api.pipeops.io` until AS discovery is live)
 - `PIPEOPS_MCP_SCOPES` optionally overrides the comma-separated advertised scopes
+
+See [docs/REMOTE_AUTH.md](docs/REMOTE_AUTH.md) for Bearer vs OAuth client matrix and rollout.
 
 ## Usage
 

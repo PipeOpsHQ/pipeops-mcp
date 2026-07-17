@@ -26,6 +26,43 @@ func TestLoadHTTPConfigFromEnvUsesCanonicalPublicURL(t *testing.T) {
 	if config.ResourceURL != "https://mcp.pipeops.app/mcp" {
 		t.Fatalf("ResourceURL = %q, want canonical .app URL", config.ResourceURL)
 	}
+	if config.AuthorizationServer != "" {
+		t.Fatalf("AuthorizationServer = %q, want empty until AS is ready", config.AuthorizationServer)
+	}
+}
+
+func TestHTTPHandlerOmitsAuthorizationServersWhenIssuerUnset(t *testing.T) {
+	t.Parallel()
+
+	handler, err := NewHTTPHandler(HTTPConfig{
+		BaseURL:     "https://api.pipeops.test",
+		ResourceURL: "https://mcp.pipeops.test/mcp",
+		// AuthorizationServer intentionally empty — Bearer-only Phase 1.
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPHandler() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/oauth-protected-resource", nil)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	var metadata struct {
+		Resource             string   `json:"resource"`
+		AuthorizationServers []string `json:"authorization_servers"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&metadata); err != nil {
+		t.Fatalf("decode metadata: %v", err)
+	}
+	if metadata.Resource != "https://mcp.pipeops.test/mcp" {
+		t.Fatalf("resource = %q", metadata.Resource)
+	}
+	if len(metadata.AuthorizationServers) != 0 {
+		t.Fatalf("authorization_servers = %#v, want empty until issuer is configured", metadata.AuthorizationServers)
+	}
 }
 
 func TestHTTPHandlerPublishesOAuthProtectedResourceMetadata(t *testing.T) {
@@ -78,9 +115,9 @@ func TestHTTPHandlerRequiresBearerAuthentication(t *testing.T) {
 	t.Parallel()
 
 	handler, err := NewHTTPHandler(HTTPConfig{
-		BaseURL:             "https://api.pipeops.test",
-		ResourceURL:         "https://mcp.pipeops.test/mcp",
-		AuthorizationServer: "https://console.pipeops.test",
+		BaseURL:     "https://api.pipeops.test",
+		ResourceURL: "https://mcp.pipeops.test/mcp",
+		// No AuthorizationServer — Bearer still required for /mcp.
 	})
 	if err != nil {
 		t.Fatalf("NewHTTPHandler() error = %v", err)
@@ -108,12 +145,24 @@ func TestHTTPHandlerRejectsInsecurePublicMetadataURLs(t *testing.T) {
 	t.Parallel()
 
 	_, err := NewHTTPHandler(HTTPConfig{
-		BaseURL:             "https://api.pipeops.test",
-		ResourceURL:         "http://mcp.pipeops.test/mcp",
-		AuthorizationServer: "https://api.pipeops.test",
+		BaseURL:     "https://api.pipeops.test",
+		ResourceURL: "http://mcp.pipeops.test/mcp",
 	})
 	if err == nil || !strings.Contains(err.Error(), "public URLs must use https") {
 		t.Fatalf("NewHTTPHandler() error = %v, want insecure URL rejection", err)
+	}
+}
+
+func TestHTTPHandlerRejectsInsecureAuthorizationServer(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewHTTPHandler(HTTPConfig{
+		BaseURL:             "https://api.pipeops.test",
+		ResourceURL:         "https://mcp.pipeops.test/mcp",
+		AuthorizationServer: "http://api.pipeops.test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "public URLs must use https") {
+		t.Fatalf("NewHTTPHandler() error = %v, want insecure AS rejection", err)
 	}
 }
 
