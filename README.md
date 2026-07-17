@@ -15,6 +15,36 @@ Model Context Protocol (MCP) server for interacting with PipeOps platform.
 
 ## Installation
 
+### Hosted MCP (recommended for customers)
+
+Once `https://mcp.pipeops.io/mcp` is deployed, customers do not install a Go
+binary. For the initial Bearer-token release:
+
+```bash
+export PIPEOPS_TOKEN="sat_your_token_here"
+codex mcp add pipeops \
+  --url https://mcp.pipeops.io/mcp \
+  --bearer-token-env-var PIPEOPS_TOKEN
+codex mcp get pipeops
+```
+
+Codex will report `Auth: Bearer token`. Browser OAuth becomes:
+
+```bash
+codex mcp add pipeops \
+  --url https://mcp.pipeops.io/mcp \
+  --oauth-client-id YOUR_PIPEOPS_CODEX_CLIENT_ID \
+  --oauth-resource https://mcp.pipeops.io/mcp
+codex mcp login pipeops \
+  --scopes pipeops:read,projects:write,deployments:write,addons:write
+```
+
+The browser flow requires the controller and dashboard items listed in
+[`docs/REMOTE_AUTH.md`](docs/REMOTE_AUTH.md). The hosted MCP endpoint itself is
+already OAuth-discovery-ready.
+
+### Local binary
+
 ```bash
 go install github.com/PipeOpsHQ/pipeops-mcp/cmd/pipeops-mcp-server@latest
 ```
@@ -38,6 +68,14 @@ The server requires authentication via either:
 
 Optional configuration:
 - `PIPEOPS_BASE_URL`: PipeOps API base URL (default: https://api.pipeops.io)
+
+Hosted transport configuration:
+
+- `PIPEOPS_TRANSPORT=http` enables Streamable HTTP (default remains `stdio`)
+- `PIPEOPS_HTTP_ADDR=:8080` controls the listen address
+- `PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.io/mcp` sets the OAuth resource URL
+- `PIPEOPS_OAUTH_ISSUER=https://api.pipeops.io` sets the existing PipeOps authorization-server issuer
+- `PIPEOPS_MCP_SCOPES` optionally overrides the comma-separated advertised scopes
 
 ## Usage
 

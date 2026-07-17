@@ -51,6 +51,18 @@ func NewServer() (*Server, error) {
 	return &Server{client: client}, nil
 }
 
+// newServerWithToken creates an isolated server for one authenticated caller.
+// It is used by the stateless HTTP transport so credentials are never shared
+// between concurrent MCP requests.
+func newServerWithToken(baseURL, token string) (*Server, error) {
+	client, err := pipeops.NewClient(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create PipeOps client: %w", err)
+	}
+	client.SetToken(token)
+	return &Server{client: client}, nil
+}
+
 // Message represents an MCP protocol message.
 type Message struct {
 	JSONRPC string          `json:"jsonrpc"`

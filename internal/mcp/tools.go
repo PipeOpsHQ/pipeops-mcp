@@ -17,6 +17,15 @@ type Tool struct {
 	Name        string                 `json:"name"`
 	Description string                 `json:"description"`
 	InputSchema map[string]interface{} `json:"inputSchema"`
+	Annotations *ToolAnnotations       `json:"annotations,omitempty"`
+}
+
+// ToolAnnotations describes operational safety hints to MCP clients.
+type ToolAnnotations struct {
+	ReadOnlyHint    bool  `json:"readOnlyHint,omitempty"`
+	DestructiveHint *bool `json:"destructiveHint,omitempty"`
+	IdempotentHint  bool  `json:"idempotentHint,omitempty"`
+	OpenWorldHint   *bool `json:"openWorldHint,omitempty"`
 }
 
 // ToolCallParams represents the parameters for a tools/call request.
@@ -1042,10 +1051,40 @@ func (s *Server) handleToolsList() interface{} {
 	definitions := s.toolDefinitions()
 	tools := make([]Tool, 0, len(definitions))
 	for _, definition := range definitions {
+		definition.tool.Annotations = annotationsForTool(definition.tool.Name)
 		tools = append(tools, definition.tool)
 	}
 
 	return map[string]interface{}{"tools": tools}
+}
+
+func annotationsForTool(name string) *ToolAnnotations {
+	readOnly := hasAnyPrefix(name, "get_", "list_", "search_", "check_", "view_")
+	additive := hasAnyPrefix(name, "create_", "add_", "invite_", "link_")
+	destructive := !readOnly && !additive
+	closedWorld := false
+	annotations := &ToolAnnotations{
+		ReadOnlyHint:   readOnly,
+		IdempotentHint: readOnly,
+		OpenWorldHint:  &closedWorld,
+	}
+	if !readOnly {
+		annotations.DestructiveHint = boolPointer(destructive)
+	}
+	return annotations
+}
+
+func hasAnyPrefix(value string, prefixes ...string) bool {
+	for _, prefix := range prefixes {
+		if strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }
 
 // handleToolsCall handles a tool invocation.
