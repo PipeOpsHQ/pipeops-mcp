@@ -18,7 +18,7 @@ import (
 
 const (
 	defaultBaseURL     = "https://api.pipeops.io"
-	defaultResourceURL = "https://mcp.pipeops.io/mcp"
+	defaultResourceURL = "https://mcp.pipeops.app/mcp"
 	defaultOAuthIssuer = "https://api.pipeops.io"
 	defaultHTTPAddr    = ":8080"
 	defaultMaxBodySize = int64(4 << 20)
