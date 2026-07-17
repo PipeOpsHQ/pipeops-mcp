@@ -1,91 +1,159 @@
 # Hosted MCP authentication
 
-## What the MCP server owns
+The hosted PipeOps MCP server supports direct Bearer tokens and a self-contained
+OAuth 2.1 bridge. The bridge is owned entirely by this repository: it does not
+require controller or Console changes.
 
-The hosted process runs the official Go MCP SDK over stateless Streamable HTTP.
-It provides:
+## Authentication modes
 
-- `POST`, `GET`, and `DELETE /mcp` through the Streamable HTTP transport
-- Bearer authentication for every `/mcp` request
-- online token validation through the existing PipeOps `GET /profile/data` API
-- a fresh PipeOps SDK client per request, preventing credentials from crossing callers
-- `GET /.well-known/oauth-protected-resource`
-- `GET /.well-known/oauth-protected-resource/mcp`
-- `401` responses with an OAuth protected-resource metadata challenge
-- read-only and destructive tool annotations
-- unauthenticated `GET /healthz`
-- the existing STDIO transport for local development and CI
+Set `PIPEOPS_OAUTH_MODE` to one of these values:
 
-Phase 1 accepts existing workspace service tokens (`sat_...`) and user product
-tokens. The authenticated token is passed to the controller for tool API calls.
-This is the agreed beta behavior; audience-bound OAuth tokens require the later
-exchange work described below.
+| Mode | Behavior | Use case |
+| --- | --- | --- |
+| `bearer` | Accept existing PipeOps tokens. OAuth discovery does not advertise an authorization server. | Default and static-header clients |
+| `bridge` | Serve OAuth discovery, dynamic client registration, consent, token, refresh, and revocation endpoints. Direct PipeOps Bearer tokens continue to work. | Production remote MCP clients |
+| `external` | Advertise `PIPEOPS_OAUTH_ISSUER` and accept Bearer tokens validated by PipeOps. | Future native PipeOps authorization server |
 
-## Deploying the MCP service
+`bearer` is the default. Use `bridge` to support clients such as ChatGPT,
+Claude custom connectors, and Cursor that expect a standards-based remote OAuth
+flow.
 
-Required runtime settings:
+## Deploy bridge mode
+
+Required settings:
 
 ```text
 PIPEOPS_TRANSPORT=http
 PIPEOPS_HTTP_ADDR=:8080
 PIPEOPS_BASE_URL=https://api.pipeops.io
 PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp
-PIPEOPS_OAUTH_ISSUER=https://api.pipeops.io
+PIPEOPS_OAUTH_MODE=bridge
+PIPEOPS_OAUTH_STORE=sqlite
+PIPEOPS_OAUTH_SQLITE_PATH=/data/oauth/pipeops-mcp-oauth.db
+PIPEOPS_OAUTH_ENCRYPTION_KEY=BASE64_ENCODED_32_BYTE_KEY
 ```
 
-Route `https://mcp.pipeops.app` to port 8080 and terminate TLS at the ingress or
-load balancer. Do not set a shared `PIPEOPS_TOKEN` in hosted mode; every customer
-supplies their own Bearer token. Use `/healthz` for health probes.
-
-Customer setup for Phase 1:
+Generate the encryption key once and store it in the deployment secret manager:
 
 ```bash
-export PIPEOPS_TOKEN="sat_your_token_here"
-codex mcp add pipeops \
-  --url https://mcp.pipeops.app/mcp \
-  --bearer-token-env-var PIPEOPS_TOKEN
+openssl rand -base64 32
 ```
 
-## Controller handoff (no controller code is changed here)
+SQLite is the default and needs no separate database service. Mount a persistent
+volume at `/data` so registrations and OAuth sessions survive container
+replacement. Run one MCP replica in SQLite mode; do not put the SQLite file on
+a shared network filesystem. The mounted directory must be writable by the
+container user (UID/GID `65532`). The server requires `/data/oauth` to have mode
+`0700`; the database and its WAL/shared-memory files use mode `0600`.
 
-Phase 1 needs no controller release. Existing product and service tokens only
-need to remain valid for `GET /profile/data` and the APIs their scopes permit.
+For multiple MCP replicas, use shared Redis 6.2 or newer instead:
 
-For browser login with `codex mcp login pipeops`, the controller team needs to:
+```text
+PIPEOPS_OAUTH_STORE=redis
+PIPEOPS_OAUTH_REDIS_URL=rediss://USER:PASSWORD@REDIS_HOST:6379/0
+```
 
-1. Publish `GET /.well-known/oauth-authorization-server` for the existing PipeOps OAuth issuer.
-2. Pre-register a public `Codex MCP` client with PKCE S256 and Codex loopback redirect URIs, or add tightly constrained RFC 7591 dynamic registration.
-3. Confirm or add refresh-token support before advertising the `refresh_token` grant.
-4. Keep using the existing `/oauth/authorize` and `/oauth/token` implementation; do not create another authorization server.
-5. Later, bind approved scopes, workspace IDs, client ID, audience, and expiry to issued MCP tokens.
-6. For production audience isolation, add RFC 7662-style introspection and a short-lived controller-token exchange so the MCP stops forwarding the raw Codex token.
+The OAuth issuer defaults to the origin of `PIPEOPS_MCP_PUBLIC_URL`, which is
+`https://mcp.pipeops.app` in production. Set `PIPEOPS_OAUTH_ISSUER` only when
+the public issuer is different. Route the public hostname to port 8080 and
+terminate TLS at the ingress or load balancer. Use `/healthz` for health probes.
 
-The authorization-server issuer should be the public API base that actually
-serves `/oauth/token`. If a console URL is desired, proxy the same routes and
-keep one stable issuer.
+Do not configure a shared `PIPEOPS_TOKEN` on the hosted process. Each customer
+authorizes their own dedicated workspace service token.
 
-## Dashboard handoff (no dashboard code is changed here)
+## OAuth endpoints
 
-For browser OAuth, the dashboard team needs to:
+Bridge mode serves:
 
-1. Add a browser front door for the existing authorize request, preserving `state`, PKCE, scopes, resource, and redirect URI.
-2. Redirect back to the Codex loopback callback with the authorization code.
-3. Add explicit consent showing the app name, requested scope groups, and workspace selection.
-4. Allow approve/deny and send the approved scopes/workspaces to the controller consent endpoint once that endpoint exists.
+- `GET /.well-known/oauth-protected-resource`
+- `GET /.well-known/oauth-protected-resource/mcp`
+- `GET /.well-known/oauth-authorization-server`
+- `GET /.well-known/openid-configuration`
+- `POST /oauth/register`
+- `GET|POST /oauth/authorize`
+- `POST /oauth/token`
+- `POST /oauth/revoke`
+- `GET /oauth/jwks`
 
-Until these handoff items ship, customers should use the Phase 1 Bearer-token
-configuration. The MCP endpoint and its protected-resource discovery remain
-compatible with the later browser flow.
+It implements authorization code with PKCE S256, dynamic client registration,
+short-lived access tokens, refresh-token rotation with family reuse detection,
+and token revocation. OAuth
+tokens are opaque; `/oauth/jwks` therefore returns an empty key set for clients
+that require the metadata field.
+
+## Credential and scope model
+
+The consent page accepts only a `sat_...` PipeOps workspace service token and
+validates it with `GET /profile/data`. The token is encrypted using AES-256-GCM
+before it is written to the configured store. OAuth access, refresh, and
+authorization codes are stored under SHA-256 lookup keys, so their plaintext
+values are not used as database keys.
+
+The bridge exposes two scopes:
+
+- `api:read` exposes only tools annotated as read-only.
+- `api:write` exposes read and mutating tools.
+
+The upstream PipeOps service token remains the final authority. An OAuth grant
+cannot make the underlying service token more powerful. Direct Bearer-token
+clients keep the existing tool surface and are authorized by the controller.
+
+Current lifetimes are 5 minutes for authorization codes, 15 minutes for access
+tokens, and 30 days for refresh tokens. Authorization codes are single-use and
+refresh tokens rotate on every use. Reusing an already-rotated refresh token
+revokes the active refresh token in that authorization family.
+
+## Security and operations
+
+- Use TLS for the public MCP endpoint and for Redis when selected.
+- Keep the SQLite database on a private persistent volume. When using Redis,
+  restrict network access to MCP instances and enable authentication.
+- Back up the encryption key in the deployment secret manager. Rotating it
+  immediately invalidates existing encrypted grants unless a migration is run.
+- Apply distributed rate limiting at the ingress. The process also has a local
+  per-instance limiter for registration, authorization, and token requests.
+- Do not log authorization headers, service tokens, OAuth codes, or request
+  bodies from consent and token endpoints.
+- Monitor `401` and `503` rates. Missing/expired credentials fail with `401`;
+  persistence or PipeOps validation failures fail closed with `503`.
+- Ask customers to create a dedicated, least-privilege service token for each AI
+  client and revoke it from PipeOps when access is no longer needed.
 
 ## Acceptance checks
 
+After deployment, confirm discovery and authentication:
+
 ```bash
-curl -i https://mcp.pipeops.app/.well-known/oauth-protected-resource
-curl -i https://mcp.pipeops.app/healthz
+curl -fsS https://mcp.pipeops.app/healthz
+curl -fsS https://mcp.pipeops.app/.well-known/oauth-protected-resource | jq
+curl -fsS https://mcp.pipeops.app/.well-known/oauth-authorization-server | jq
 curl -i -X POST https://mcp.pipeops.app/mcp
 ```
 
-The unauthenticated MCP request must return `401` and a `WWW-Authenticate:
-Bearer ... resource_metadata=...` challenge. An authenticated MCP initialize
-request must succeed with an existing PipeOps token, and Codex must report
-`Auth: Bearer token` rather than `Auth: Unsupported`.
+The protected-resource document must list `https://mcp.pipeops.app` as its
+authorization server. The authorization-server document must advertise PKCE
+`S256`, dynamic registration, authorization code, refresh token, and revocation.
+The unauthenticated MCP request must return `401` with a `WWW-Authenticate`
+challenge containing `resource_metadata`.
+
+Run the repository verification before release:
+
+```bash
+go test -race ./...
+go vet ./...
+go build ./cmd/pipeops-mcp-server
+```
+
+Then connect one OAuth client end to end, approve only `api:read`, and verify
+that list/get tools appear while create/update/delete/deploy tools do not. Repeat
+with `api:write` and verify the full tool surface. Finally, revoke the OAuth
+token and the underlying PipeOps service token independently and confirm both
+paths stop authorizing requests.
+
+## Future native PipeOps OAuth
+
+The bridge is intentionally replaceable. Once PipeOps exposes a native OAuth
+authorization server that supports MCP resource indicators and the required
+clients, set `PIPEOPS_OAUTH_MODE=external` and
+`PIPEOPS_OAUTH_ISSUER=https://the-native-issuer.example`. No client endpoint
+change is required; clients continue using `https://mcp.pipeops.app/mcp`.

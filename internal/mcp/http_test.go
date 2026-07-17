@@ -2,11 +2,13 @@ package mcp
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,12 +21,100 @@ func TestLoadHTTPConfigFromEnvUsesCanonicalPublicURL(t *testing.T) {
 	t.Setenv("PIPEOPS_HTTP_ADDR", "")
 	t.Setenv("PIPEOPS_BASE_URL", "")
 	t.Setenv("PIPEOPS_MCP_PUBLIC_URL", "")
+	t.Setenv("PIPEOPS_OAUTH_MODE", "")
 	t.Setenv("PIPEOPS_OAUTH_ISSUER", "")
+	t.Setenv("PIPEOPS_OAUTH_STORE", "")
+	t.Setenv("PIPEOPS_OAUTH_SQLITE_PATH", "")
+	t.Setenv("PIPEOPS_OAUTH_REDIS_URL", "")
+	t.Setenv("PIPEOPS_OAUTH_ENCRYPTION_KEY", "")
 	t.Setenv("PIPEOPS_MCP_SCOPES", "")
 
 	config := LoadHTTPConfigFromEnv()
 	if config.ResourceURL != "https://mcp.pipeops.app/mcp" {
 		t.Fatalf("ResourceURL = %q, want canonical .app URL", config.ResourceURL)
+	}
+	if config.OAuthStore != "sqlite" || config.OAuthSQLitePath != "/data/oauth/pipeops-mcp-oauth.db" {
+		t.Fatalf("OAuth SQLite defaults = store %q path %q", config.OAuthStore, config.OAuthSQLitePath)
+	}
+}
+
+func TestHTTPDefaultsSelectOAuthStore(t *testing.T) {
+	tests := []struct {
+		name      string
+		config    HTTPConfig
+		wantStore string
+	}{
+		{name: "SQLite by default", config: HTTPConfig{}, wantStore: "sqlite"},
+		{
+			name:      "Redis URL preserves existing configuration",
+			config:    HTTPConfig{OAuthRedisURL: "redis://localhost:6379/0"},
+			wantStore: "redis",
+		},
+		{
+			name:      "explicit SQLite overrides Redis URL",
+			config:    HTTPConfig{OAuthStore: "sqlite", OAuthRedisURL: "redis://localhost:6379/0"},
+			wantStore: "sqlite",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := withHTTPDefaults(test.config)
+			if config.OAuthStore != test.wantStore {
+				t.Fatalf("OAuthStore = %q, want %q", config.OAuthStore, test.wantStore)
+			}
+		})
+	}
+}
+
+func TestHTTPHandlerClosesOwnedSQLiteStore(t *testing.T) {
+	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	handler, err := NewHTTPHandler(HTTPConfig{
+		BaseURL:            "https://api.pipeops.test",
+		ResourceURL:        "https://mcp.pipeops.test/mcp",
+		OAuthMode:          "bridge",
+		OAuthStore:         "sqlite",
+		OAuthSQLitePath:    filepath.Join(t.TempDir(), "oauth.db"),
+		OAuthEncryptionKey: key,
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPHandler() error = %v", err)
+	}
+	store, ok := handler.closer.(*sqliteOAuthStore)
+	if !ok {
+		t.Fatalf("owned store type = %T, want *sqliteOAuthStore", handler.closer)
+	}
+	if err := handler.Close(); err != nil {
+		t.Fatalf("close handler: %v", err)
+	}
+	if err := handler.Close(); err != nil {
+		t.Fatalf("close handler twice: %v", err)
+	}
+	if err := store.db.Ping(); err == nil {
+		t.Fatal("owned SQLite store remains open after handler close")
+	}
+}
+
+func TestHTTPHandlerBridgeModeRequiresProductionSecrets(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewHTTPHandler(HTTPConfig{
+		BaseURL:     "https://api.pipeops.test",
+		ResourceURL: "https://mcp.pipeops.test/mcp",
+		OAuthMode:   "bridge",
+	})
+	if err == nil || !strings.Contains(err.Error(), "PIPEOPS_OAUTH_ENCRYPTION_KEY") {
+		t.Fatalf("missing encryption key error = %v", err)
+	}
+
+	_, err = NewHTTPHandler(HTTPConfig{
+		BaseURL:            "https://api.pipeops.test",
+		ResourceURL:        "https://mcp.pipeops.test/mcp",
+		OAuthMode:          "bridge",
+		OAuthEncryptionKey: "invalid",
+		oauthStore:         newMemoryOAuthStore(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "base64-encoded 32-byte key") {
+		t.Fatalf("invalid encryption key error = %v", err)
 	}
 }
 
@@ -34,6 +124,7 @@ func TestHTTPHandlerPublishesOAuthProtectedResourceMetadata(t *testing.T) {
 	handler, err := NewHTTPHandler(HTTPConfig{
 		BaseURL:             "https://api.pipeops.test",
 		ResourceURL:         "https://mcp.pipeops.test/mcp",
+		OAuthMode:           "external",
 		AuthorizationServer: "https://console.pipeops.test",
 		Scopes:              []string{"api:read", "api:write"},
 	})
@@ -96,7 +187,7 @@ func TestHTTPHandlerRequiresBearerAuthentication(t *testing.T) {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
 	challenge := recorder.Header().Get("WWW-Authenticate")
-	if challenge != `Bearer resource_metadata="https://mcp.pipeops.test/.well-known/oauth-protected-resource"` {
+	if challenge != `Bearer resource_metadata="https://mcp.pipeops.test/.well-known/oauth-protected-resource", scope="api:read"` {
 		t.Fatalf("WWW-Authenticate = %q", challenge)
 	}
 	if got := recorder.Header().Get("X-Content-Type-Options"); got != "nosniff" {
