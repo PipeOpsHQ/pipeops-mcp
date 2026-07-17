@@ -28,7 +28,8 @@ PIPEOPS_HTTP_ADDR=:8080
 PIPEOPS_BASE_URL=https://api.pipeops.io
 PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp
 PIPEOPS_OAUTH_MODE=bridge
-PIPEOPS_OAUTH_REDIS_URL=rediss://USER:PASSWORD@REDIS_HOST:6379/0
+PIPEOPS_OAUTH_STORE=sqlite
+PIPEOPS_OAUTH_SQLITE_PATH=/data/oauth/pipeops-mcp-oauth.db
 PIPEOPS_OAUTH_ENCRYPTION_KEY=BASE64_ENCODED_32_BYTE_KEY
 ```
 
@@ -38,8 +39,21 @@ Generate the encryption key once and store it in the deployment secret manager:
 openssl rand -base64 32
 ```
 
-Use Redis 6.2 or newer; refresh and authorization-code replay protection uses
-the atomic `GETDEL` command. The OAuth issuer defaults to the origin of `PIPEOPS_MCP_PUBLIC_URL`, which is
+SQLite is the default and needs no separate database service. Mount a persistent
+volume at `/data` so registrations and OAuth sessions survive container
+replacement. Run one MCP replica in SQLite mode; do not put the SQLite file on
+a shared network filesystem. The mounted directory must be writable by the
+container user (UID/GID `65532`). The server requires `/data/oauth` to have mode
+`0700`; the database and its WAL/shared-memory files use mode `0600`.
+
+For multiple MCP replicas, use shared Redis 6.2 or newer instead:
+
+```text
+PIPEOPS_OAUTH_STORE=redis
+PIPEOPS_OAUTH_REDIS_URL=rediss://USER:PASSWORD@REDIS_HOST:6379/0
+```
+
+The OAuth issuer defaults to the origin of `PIPEOPS_MCP_PUBLIC_URL`, which is
 `https://mcp.pipeops.app` in production. Set `PIPEOPS_OAUTH_ISSUER` only when
 the public issuer is different. Route the public hostname to port 8080 and
 terminate TLS at the ingress or load balancer. Use `/healthz` for health probes.
@@ -71,9 +85,9 @@ that require the metadata field.
 
 The consent page accepts only a `sat_...` PipeOps workspace service token and
 validates it with `GET /profile/data`. The token is encrypted using AES-256-GCM
-before it is written to Redis. OAuth access, refresh, and authorization codes
-are stored under SHA-256 lookup keys, so their plaintext values are not used as
-Redis keys.
+before it is written to the configured store. OAuth access, refresh, and
+authorization codes are stored under SHA-256 lookup keys, so their plaintext
+values are not used as database keys.
 
 The bridge exposes two scopes:
 
@@ -91,8 +105,9 @@ revokes the active refresh token in that authorization family.
 
 ## Security and operations
 
-- Use TLS for the public MCP and Redis endpoints.
-- Restrict Redis network access to MCP instances and enable authentication.
+- Use TLS for the public MCP endpoint and for Redis when selected.
+- Keep the SQLite database on a private persistent volume. When using Redis,
+  restrict network access to MCP instances and enable authentication.
 - Back up the encryption key in the deployment secret manager. Rotating it
   immediately invalidates existing encrypted grants unless a migration is run.
 - Apply distributed rate limiting at the ingress. The process also has a local
@@ -100,7 +115,7 @@ revokes the active refresh token in that authorization family.
 - Do not log authorization headers, service tokens, OAuth codes, or request
   bodies from consent and token endpoints.
 - Monitor `401` and `503` rates. Missing/expired credentials fail with `401`;
-  Redis or PipeOps validation outages fail closed with `503`.
+  persistence or PipeOps validation failures fail closed with `503`.
 - Ask customers to create a dedicated, least-privilege service token for each AI
   client and revoke it from PipeOps when access is no longer needed.
 

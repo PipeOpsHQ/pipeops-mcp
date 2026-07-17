@@ -50,12 +50,17 @@ func run() error {
 	}
 }
 
-func runHTTP(ctx context.Context) error {
+func runHTTP(ctx context.Context) (returnErr error) {
 	config := mcp.LoadHTTPConfigFromEnv()
 	handler, err := mcp.NewHTTPHandler(config)
 	if err != nil {
 		return fmt.Errorf("configure HTTP transport: %w", err)
 	}
+	defer func() {
+		if err := handler.Close(); err != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close HTTP transport: %w", err))
+		}
+	}()
 
 	server := &http.Server{
 		Addr:              config.Addr,

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -19,6 +20,36 @@ import (
 )
 
 func TestOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t *testing.T) {
+	tests := []struct {
+		name     string
+		newStore func(*testing.T) oauthStore
+	}{
+		{
+			name: "memory",
+			newStore: func(*testing.T) oauthStore {
+				return newMemoryOAuthStore()
+			},
+		},
+		{
+			name: "sqlite",
+			newStore: func(t *testing.T) oauthStore {
+				store, err := newSQLiteOAuthStore(context.Background(), filepath.Join(t.TempDir(), "oauth.db"))
+				if err != nil {
+					t.Fatalf("open SQLite OAuth store: %v", err)
+				}
+				t.Cleanup(func() { _ = store.Close() })
+				return store
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			testOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t, test.newStore(t))
+		})
+	}
+}
+
+func testOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t *testing.T, store oauthStore) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/profile/data" || r.Header.Get("Authorization") != "Bearer sat_valid" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -29,7 +60,7 @@ func TestOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t *testing.T) {
 	}))
 	defer api.Close()
 
-	handler := newTestOAuthBridgeHandler(t, api.URL)
+	handler := newTestOAuthBridgeHandlerWithStore(t, api.URL, store)
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -367,6 +398,11 @@ func (s *failingGrantReadStore) Get(ctx context.Context, key string) ([]byte, er
 
 func newTestOAuthBridgeHandler(t *testing.T, baseURL string) http.Handler {
 	t.Helper()
+	return newTestOAuthBridgeHandlerWithStore(t, baseURL, newMemoryOAuthStore())
+}
+
+func newTestOAuthBridgeHandlerWithStore(t *testing.T, baseURL string, store oauthStore) http.Handler {
+	t.Helper()
 	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 	handler, err := NewHTTPHandler(HTTPConfig{
 		BaseURL:             baseURL,
@@ -375,7 +411,7 @@ func newTestOAuthBridgeHandler(t *testing.T, baseURL string) http.Handler {
 		AuthorizationServer: "https://mcp.pipeops.test",
 		OAuthEncryptionKey:  key,
 		Scopes:              []string{"api:read", "api:write"},
-		oauthStore:          newMemoryOAuthStore(),
+		oauthStore:          store,
 	})
 	if err != nil {
 		t.Fatalf("NewHTTPHandler: %v", err)

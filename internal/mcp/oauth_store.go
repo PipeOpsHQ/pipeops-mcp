@@ -30,6 +30,13 @@ type redisOAuthStore struct {
 	client *redis.Client
 }
 
+func (s *redisOAuthStore) Close() error {
+	if err := s.client.Close(); err != nil {
+		return fmt.Errorf("close OAuth Redis client: %w", err)
+	}
+	return nil
+}
+
 func newRedisOAuthStore(ctx context.Context, rawURL string) (*redisOAuthStore, error) {
 	options, err := redis.ParseURL(rawURL)
 	if err != nil {

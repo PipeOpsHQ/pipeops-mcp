@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/PipeOpsHQ/pipeops-go-sdk/pipeops"
@@ -21,9 +22,30 @@ const (
 	defaultResourceURL = "https://mcp.pipeops.app/mcp"
 	defaultHTTPAddr    = ":8080"
 	defaultMaxBodySize = int64(4 << 20)
+	defaultOAuthStore  = "sqlite"
+	defaultSQLitePath  = "/data/oauth/pipeops-mcp-oauth.db"
 )
 
 type verifiedCredentialContextKey struct{}
+
+// HTTPHandler serves the hosted MCP endpoint and closes any persistence store
+// it owns when Close is called.
+type HTTPHandler struct {
+	http.Handler
+	closeOnce sync.Once
+	closer    interface{ Close() error }
+	closeErr  error
+}
+
+// Close flushes and releases the persistence store owned by the handler.
+func (h *HTTPHandler) Close() error {
+	h.closeOnce.Do(func() {
+		if h.closer != nil {
+			h.closeErr = h.closer.Close()
+		}
+	})
+	return h.closeErr
+}
 
 // HTTPConfig configures the hosted Streamable HTTP MCP endpoint.
 type HTTPConfig struct {
@@ -32,6 +54,8 @@ type HTTPConfig struct {
 	ResourceURL         string
 	OAuthMode           string
 	AuthorizationServer string
+	OAuthStore          string
+	OAuthSQLitePath     string
 	OAuthRedisURL       string
 	OAuthEncryptionKey  string
 	Scopes              []string
@@ -47,6 +71,8 @@ func LoadHTTPConfigFromEnv() HTTPConfig {
 		ResourceURL:         strings.TrimSpace(os.Getenv("PIPEOPS_MCP_PUBLIC_URL")),
 		OAuthMode:           strings.ToLower(strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_MODE"))),
 		AuthorizationServer: strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_ISSUER")),
+		OAuthStore:          strings.ToLower(strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_STORE"))),
+		OAuthSQLitePath:     strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_SQLITE_PATH")),
 		OAuthRedisURL:       strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_REDIS_URL")),
 		OAuthEncryptionKey:  strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_ENCRYPTION_KEY")),
 		Scopes:              splitList(os.Getenv("PIPEOPS_MCP_SCOPES")),
@@ -64,12 +90,12 @@ func LoadHTTPConfigFromEnv() HTTPConfig {
 	if len(config.Scopes) == 0 {
 		config.Scopes = defaultMCPScopes()
 	}
-	return config
+	return withHTTPDefaults(config)
 }
 
 // NewHTTPHandler returns a stateless Streamable HTTP MCP handler with Bearer
 // authentication and OAuth protected-resource discovery.
-func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
+func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 	config = withHTTPDefaults(config)
 	resourceURL, err := validatePublicURL("resource URL", config.ResourceURL)
 	if err != nil {
@@ -83,6 +109,7 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 	}
 
 	var bridge *oauthBridge
+	var ownedStore interface{ Close() error }
 	authorizationServers := []string{}
 	switch config.OAuthMode {
 	case "", "bearer":
@@ -103,19 +130,27 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 		if _, err := validatePublicURL("authorization server", issuer); err != nil {
 			return nil, err
 		}
-		store := config.oauthStore
-		if store == nil {
-			if config.OAuthRedisURL == "" {
-				return nil, errors.New("PIPEOPS_OAUTH_REDIS_URL is required when PIPEOPS_OAUTH_MODE=bridge")
-			}
-			store, err = newRedisOAuthStore(context.Background(), config.OAuthRedisURL)
-			if err != nil {
-				return nil, err
-			}
-		}
 		credentialCipher, err := newCredentialCipher(config.OAuthEncryptionKey)
 		if err != nil {
 			return nil, err
+		}
+		store := config.oauthStore
+		if store == nil {
+			switch config.OAuthStore {
+			case "sqlite":
+				store, err = newSQLiteOAuthStore(context.Background(), config.OAuthSQLitePath)
+			case "redis":
+				if config.OAuthRedisURL == "" {
+					return nil, errors.New("PIPEOPS_OAUTH_REDIS_URL is required when PIPEOPS_OAUTH_STORE=redis")
+				}
+				store, err = newRedisOAuthStore(context.Background(), config.OAuthRedisURL)
+			default:
+				return nil, fmt.Errorf("unsupported PIPEOPS_OAUTH_STORE %q: use sqlite or redis", config.OAuthStore)
+			}
+			if err != nil {
+				return nil, err
+			}
+			ownedStore, _ = store.(interface{ Close() error })
 		}
 		bridge, err = newOAuthBridge(oauthBridgeConfig{
 			Issuer:      issuer,
@@ -126,6 +161,11 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 			Cipher:      credentialCipher,
 		})
 		if err != nil {
+			if ownedStore != nil {
+				if closeErr := ownedStore.Close(); closeErr != nil {
+					return nil, errors.Join(err, closeErr)
+				}
+			}
 			return nil, err
 		}
 		config.AuthorizationServer = issuer
@@ -178,7 +218,7 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	return securityHeaders(mux), nil
+	return &HTTPHandler{Handler: securityHeaders(mux), closer: ownedStore}, nil
 }
 
 func withHTTPDefaults(config HTTPConfig) HTTPConfig {
@@ -189,6 +229,17 @@ func withHTTPDefaults(config HTTPConfig) HTTPConfig {
 		config.ResourceURL = defaultResourceURL
 	}
 	config.OAuthMode = strings.ToLower(strings.TrimSpace(config.OAuthMode))
+	config.OAuthStore = strings.ToLower(strings.TrimSpace(config.OAuthStore))
+	if config.OAuthStore == "" {
+		if config.OAuthRedisURL != "" {
+			config.OAuthStore = "redis"
+		} else {
+			config.OAuthStore = defaultOAuthStore
+		}
+	}
+	if config.OAuthSQLitePath == "" {
+		config.OAuthSQLitePath = defaultSQLitePath
+	}
 	if config.MaxBodyBytes <= 0 {
 		config.MaxBodyBytes = defaultMaxBodySize
 	}

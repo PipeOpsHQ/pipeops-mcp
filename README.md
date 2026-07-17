@@ -75,14 +75,20 @@ Hosted transport configuration:
 - `PIPEOPS_HTTP_ADDR=:8080` controls the listen address
 - `PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp` sets the OAuth resource URL
 - `PIPEOPS_OAUTH_MODE=bearer|bridge|external` selects the hosted authentication mode
-- `PIPEOPS_OAUTH_REDIS_URL` is required in `bridge` mode
+- `PIPEOPS_OAUTH_STORE=sqlite|redis` selects bridge persistence (defaults to `sqlite`)
+- `PIPEOPS_OAUTH_SQLITE_PATH=/data/oauth/pipeops-mcp-oauth.db` sets the SQLite file used by a single MCP replica
+- `PIPEOPS_OAUTH_REDIS_URL` is required only when `PIPEOPS_OAUTH_STORE=redis`
 - `PIPEOPS_OAUTH_ENCRYPTION_KEY` is required in `bridge` mode and must be a base64-encoded 32-byte key
 - `PIPEOPS_OAUTH_ISSUER` optionally overrides the bridge issuer and is required in `external` mode
 - `PIPEOPS_MCP_SCOPES` optionally overrides the comma-separated scopes (defaults to `api:read,api:write`)
 
-Generate the bridge encryption key with `openssl rand -base64 32`. Do not set a
-shared `PIPEOPS_TOKEN` on the hosted service; each customer authorizes their own
-workspace credential.
+Generate the bridge encryption key with `openssl rand -base64 32`. Mount a
+persistent volume at `/data` when using SQLite so OAuth connections survive
+container replacement. Use Redis only when multiple MCP replicas need shared
+state. The mounted directory must be writable by UID/GID `65532`; the server
+keeps `/data/oauth` private with mode `0700` and its database files at mode
+`0600`. Do not set a shared `PIPEOPS_TOKEN` on the hosted service; each customer
+authorizes their own workspace credential.
 
 ## Usage
 
