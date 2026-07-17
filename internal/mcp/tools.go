@@ -1051,6 +1051,9 @@ func (s *Server) handleToolsList() interface{} {
 	definitions := s.toolDefinitions()
 	tools := make([]Tool, 0, len(definitions))
 	for _, definition := range definitions {
+		if !s.toolAllowed(definition.tool.Name) {
+			continue
+		}
 		definition.tool.Annotations = annotationsForTool(definition.tool.Name)
 		tools = append(tools, definition.tool)
 	}
@@ -1106,6 +1109,9 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (i
 	}
 
 	callParams.Name = normalizeLegacyToolName(callParams.Name)
+	if !s.toolAllowed(callParams.Name) {
+		return nil, fmt.Errorf("tool %s is not allowed by the approved OAuth scopes", callParams.Name)
+	}
 	if callParams.Arguments == nil {
 		callParams.Arguments = map[string]interface{}{}
 	}

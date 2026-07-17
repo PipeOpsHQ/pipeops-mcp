@@ -12,7 +12,8 @@ import (
 
 // Server represents the MCP server.
 type Server struct {
-	client *pipeops.Client
+	client        *pipeops.Client
+	allowedScopes map[string]struct{}
 }
 
 // NewServer creates a new MCP server.
@@ -51,16 +52,38 @@ func NewServer() (*Server, error) {
 	return &Server{client: client}, nil
 }
 
-// newServerWithToken creates an isolated server for one authenticated caller.
-// It is used by the stateless HTTP transport so credentials are never shared
-// between concurrent MCP requests.
-func newServerWithToken(baseURL, token string) (*Server, error) {
+// newServerWithTokenAndScopes creates an isolated server and limits its MCP
+// tool surface to the scopes approved during the OAuth grant. A nil scope list
+// preserves the direct Bearer-token behavior and lets the controller enforce
+// the service token's own permissions.
+func newServerWithTokenAndScopes(baseURL, token string, scopes []string) (*Server, error) {
 	client, err := pipeops.NewClient(baseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create PipeOps client: %w", err)
 	}
 	client.SetToken(token)
-	return &Server{client: client}, nil
+	var allowedScopes map[string]struct{}
+	if scopes != nil {
+		allowedScopes = make(map[string]struct{}, len(scopes))
+		for _, scope := range scopes {
+			allowedScopes[scope] = struct{}{}
+		}
+	}
+	return &Server{client: client, allowedScopes: allowedScopes}, nil
+}
+
+func (s *Server) toolAllowed(name string) bool {
+	if s.allowedScopes == nil {
+		return true
+	}
+	annotations := annotationsForTool(name)
+	if annotations.ReadOnlyHint {
+		_, readAllowed := s.allowedScopes["api:read"]
+		_, writeAllowed := s.allowedScopes["api:write"]
+		return readAllowed || writeAllowed
+	}
+	_, writeAllowed := s.allowedScopes["api:write"]
+	return writeAllowed
 }
 
 // Message represents an MCP protocol message.

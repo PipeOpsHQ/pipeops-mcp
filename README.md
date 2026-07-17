@@ -17,8 +17,20 @@ Model Context Protocol (MCP) server for interacting with PipeOps platform.
 
 ### Hosted MCP (recommended for customers)
 
-Once `https://mcp.pipeops.app/mcp` is deployed, customers do not install a Go
-binary. For the initial Bearer-token release:
+Customers do not install a Go binary. Add the hosted endpoint to any remote MCP
+client:
+
+```text
+https://mcp.pipeops.app/mcp
+```
+
+When the hosted service runs with `PIPEOPS_OAUTH_MODE=bridge`, OAuth-capable
+clients discover the authorization server automatically. The PipeOps consent
+page asks for a dedicated workspace service token and returns short-lived,
+scoped OAuth credentials to the MCP client. The raw PipeOps token is encrypted
+at rest and is never returned to the client.
+
+Clients that support static request headers can continue to connect directly:
 
 ```bash
 export PIPEOPS_TOKEN="sat_your_token_here"
@@ -28,20 +40,8 @@ codex mcp add pipeops \
 codex mcp get pipeops
 ```
 
-Codex will report `Auth: Bearer token`. Browser OAuth becomes:
-
-```bash
-codex mcp add pipeops \
-  --url https://mcp.pipeops.app/mcp \
-  --oauth-client-id YOUR_PIPEOPS_CODEX_CLIENT_ID \
-  --oauth-resource https://mcp.pipeops.app/mcp
-codex mcp login pipeops \
-  --scopes pipeops:read,projects:write,deployments:write,addons:write
-```
-
-The browser flow requires the controller and dashboard items listed in
-[`docs/REMOTE_AUTH.md`](docs/REMOTE_AUTH.md). The hosted MCP endpoint itself is
-already OAuth-discovery-ready.
+See [`docs/REMOTE_AUTH.md`](docs/REMOTE_AUTH.md) for deployment modes, OAuth
+endpoints, storage requirements, and acceptance checks.
 
 ### Local binary
 
@@ -63,7 +63,7 @@ go install ./cmd/pipeops-mcp-server
 
 The server requires authentication via either:
 
-1. **Service / API Token (recommended)**: Set `PIPEOPS_TOKEN` to a workspace service token (`sat_…`) with `api:full` (Integrations → Service Tokens → platform preset)
+1. **Service / API Token (recommended)**: Set `PIPEOPS_TOKEN` to a dedicated workspace service token (`sat_…`) with `api:read` and only the additional scopes it needs (Integrations → Service Tokens)
 2. **Email/Password**: Set `PIPEOPS_EMAIL` and `PIPEOPS_PASSWORD` environment variables
 
 Optional configuration:
@@ -74,8 +74,15 @@ Hosted transport configuration:
 - `PIPEOPS_TRANSPORT=http` enables Streamable HTTP (default remains `stdio`)
 - `PIPEOPS_HTTP_ADDR=:8080` controls the listen address
 - `PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp` sets the OAuth resource URL
-- `PIPEOPS_OAUTH_ISSUER=https://api.pipeops.io` sets the existing PipeOps authorization-server issuer
-- `PIPEOPS_MCP_SCOPES` optionally overrides the comma-separated advertised scopes
+- `PIPEOPS_OAUTH_MODE=bearer|bridge|external` selects the hosted authentication mode
+- `PIPEOPS_OAUTH_REDIS_URL` is required in `bridge` mode
+- `PIPEOPS_OAUTH_ENCRYPTION_KEY` is required in `bridge` mode and must be a base64-encoded 32-byte key
+- `PIPEOPS_OAUTH_ISSUER` optionally overrides the bridge issuer and is required in `external` mode
+- `PIPEOPS_MCP_SCOPES` optionally overrides the comma-separated scopes (defaults to `api:read,api:write`)
+
+Generate the bridge encryption key with `openssl rand -base64 32`. Do not set a
+shared `PIPEOPS_TOKEN` on the hosted service; each customer authorizes their own
+workspace credential.
 
 ## Usage
 

@@ -19,21 +19,24 @@ import (
 const (
 	defaultBaseURL     = "https://api.pipeops.io"
 	defaultResourceURL = "https://mcp.pipeops.app/mcp"
-	defaultOAuthIssuer = "https://api.pipeops.io"
 	defaultHTTPAddr    = ":8080"
 	defaultMaxBodySize = int64(4 << 20)
 )
 
-type bearerTokenContextKey struct{}
+type verifiedCredentialContextKey struct{}
 
 // HTTPConfig configures the hosted Streamable HTTP MCP endpoint.
 type HTTPConfig struct {
 	Addr                string
 	BaseURL             string
 	ResourceURL         string
+	OAuthMode           string
 	AuthorizationServer string
+	OAuthRedisURL       string
+	OAuthEncryptionKey  string
 	Scopes              []string
 	MaxBodyBytes        int64
+	oauthStore          oauthStore
 }
 
 // LoadHTTPConfigFromEnv loads hosted MCP settings from environment variables.
@@ -42,7 +45,10 @@ func LoadHTTPConfigFromEnv() HTTPConfig {
 		Addr:                strings.TrimSpace(os.Getenv("PIPEOPS_HTTP_ADDR")),
 		BaseURL:             strings.TrimSpace(os.Getenv("PIPEOPS_BASE_URL")),
 		ResourceURL:         strings.TrimSpace(os.Getenv("PIPEOPS_MCP_PUBLIC_URL")),
+		OAuthMode:           strings.ToLower(strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_MODE"))),
 		AuthorizationServer: strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_ISSUER")),
+		OAuthRedisURL:       strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_REDIS_URL")),
+		OAuthEncryptionKey:  strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_ENCRYPTION_KEY")),
 		Scopes:              splitList(os.Getenv("PIPEOPS_MCP_SCOPES")),
 		MaxBodyBytes:        defaultMaxBodySize,
 	}
@@ -54,9 +60,6 @@ func LoadHTTPConfigFromEnv() HTTPConfig {
 	}
 	if config.ResourceURL == "" {
 		config.ResourceURL = defaultResourceURL
-	}
-	if config.AuthorizationServer == "" {
-		config.AuthorizationServer = defaultOAuthIssuer
 	}
 	if len(config.Scopes) == 0 {
 		config.Scopes = defaultMCPScopes()
@@ -72,28 +75,80 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := validatePublicURL("authorization server", config.AuthorizationServer); err != nil {
-		return nil, err
+	if resourceURL.RawQuery != "" {
+		return nil, errors.New("resource URL must not contain a query string")
 	}
 	if _, err := validateAbsoluteURL("PipeOps API base URL", config.BaseURL); err != nil {
 		return nil, err
 	}
 
+	var bridge *oauthBridge
+	authorizationServers := []string{}
+	switch config.OAuthMode {
+	case "", "bearer":
+		config.OAuthMode = "bearer"
+	case "external":
+		if config.AuthorizationServer == "" {
+			return nil, errors.New("PIPEOPS_OAUTH_ISSUER is required when PIPEOPS_OAUTH_MODE=external")
+		}
+		if _, err := validatePublicURL("authorization server", config.AuthorizationServer); err != nil {
+			return nil, err
+		}
+		authorizationServers = append(authorizationServers, config.AuthorizationServer)
+	case "bridge":
+		issuer := config.AuthorizationServer
+		if issuer == "" {
+			issuer = resourceURL.Scheme + "://" + resourceURL.Host
+		}
+		if _, err := validatePublicURL("authorization server", issuer); err != nil {
+			return nil, err
+		}
+		store := config.oauthStore
+		if store == nil {
+			if config.OAuthRedisURL == "" {
+				return nil, errors.New("PIPEOPS_OAUTH_REDIS_URL is required when PIPEOPS_OAUTH_MODE=bridge")
+			}
+			store, err = newRedisOAuthStore(context.Background(), config.OAuthRedisURL)
+			if err != nil {
+				return nil, err
+			}
+		}
+		credentialCipher, err := newCredentialCipher(config.OAuthEncryptionKey)
+		if err != nil {
+			return nil, err
+		}
+		bridge, err = newOAuthBridge(oauthBridgeConfig{
+			Issuer:      issuer,
+			ResourceURL: config.ResourceURL,
+			BaseURL:     config.BaseURL,
+			Scopes:      config.Scopes,
+			Store:       store,
+			Cipher:      credentialCipher,
+		})
+		if err != nil {
+			return nil, err
+		}
+		config.AuthorizationServer = issuer
+		authorizationServers = append(authorizationServers, issuer)
+	default:
+		return nil, fmt.Errorf("unsupported PIPEOPS_OAUTH_MODE %q: use bearer, bridge, or external", config.OAuthMode)
+	}
+
 	metadataURL := resourceURL.Scheme + "://" + resourceURL.Host + "/.well-known/oauth-protected-resource"
 	metadata := &oauthex.ProtectedResourceMetadata{
 		Resource:               config.ResourceURL,
-		AuthorizationServers:   []string{config.AuthorizationServer},
+		AuthorizationServers:   authorizationServers,
 		ScopesSupported:        config.Scopes,
 		BearerMethodsSupported: []string{"header"},
 		ResourceName:           "PipeOps MCP Server",
 	}
 
 	streamable := sdkmcp.NewStreamableHTTPHandler(func(request *http.Request) *sdkmcp.Server {
-		token, _ := request.Context().Value(bearerTokenContextKey{}).(string)
-		if token == "" {
+		credential, _ := request.Context().Value(verifiedCredentialContextKey{}).(*verifiedCredential)
+		if credential == nil || credential.UpstreamToken == "" {
 			return nil
 		}
-		server, err := newServerWithToken(config.BaseURL, token)
+		server, err := newServerWithTokenAndScopes(config.BaseURL, credential.UpstreamToken, credential.Scopes)
 		if err != nil {
 			return nil
 		}
@@ -103,16 +158,20 @@ func NewHTTPHandler(config HTTPConfig) (http.Handler, error) {
 		JSONResponse: true,
 	})
 
-	verifier := controllerTokenVerifier(config.BaseURL)
+	verifier := controllerCredentialVerifier(config.BaseURL, bridge)
 	authenticated := requireBearerToken(
 		verifier,
 		metadataURL,
+		defaultChallengeScope(config.Scopes),
 		limitRequestBody(streamable, config.MaxBodyBytes),
 	)
 
 	mux := http.NewServeMux()
 	mux.Handle("/.well-known/oauth-protected-resource", auth.ProtectedResourceMetadataHandler(metadata))
 	mux.Handle("/.well-known/oauth-protected-resource/mcp", auth.ProtectedResourceMetadataHandler(metadata))
+	if bridge != nil {
+		bridge.registerRoutes(mux)
+	}
 	mux.Handle("/mcp", authenticated)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -129,9 +188,7 @@ func withHTTPDefaults(config HTTPConfig) HTTPConfig {
 	if config.ResourceURL == "" {
 		config.ResourceURL = defaultResourceURL
 	}
-	if config.AuthorizationServer == "" {
-		config.AuthorizationServer = defaultOAuthIssuer
-	}
+	config.OAuthMode = strings.ToLower(strings.TrimSpace(config.OAuthMode))
 	if config.MaxBodyBytes <= 0 {
 		config.MaxBodyBytes = defaultMaxBodySize
 	}
@@ -143,13 +200,21 @@ func withHTTPDefaults(config HTTPConfig) HTTPConfig {
 
 func defaultMCPScopes() []string {
 	return []string{
-		"pipeops:read",
-		"projects:write",
-		"deployments:write",
-		"addons:write",
-		"billing:write",
-		"tokens:admin",
+		"api:read",
+		"api:write",
 	}
+}
+
+func defaultChallengeScope(scopes []string) string {
+	for _, scope := range scopes {
+		if scope == "api:read" {
+			return scope
+		}
+	}
+	if len(scopes) > 0 {
+		return scopes[0]
+	}
+	return ""
 }
 
 func validateAbsoluteURL(name, value string) (*url.URL, error) {
@@ -167,6 +232,9 @@ func validatePublicURL(name, value string) (*url.URL, error) {
 	parsed, err := validateAbsoluteURL(name, value)
 	if err != nil {
 		return nil, err
+	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return nil, fmt.Errorf("%s must not contain user information or a fragment", name)
 	}
 	if parsed.Scheme != "https" && !isLoopbackHostname(parsed.Hostname()) {
 		return nil, fmt.Errorf("invalid %s scheme %q: public URLs must use https", name, parsed.Scheme)
@@ -225,36 +293,63 @@ func controllerTokenVerifier(baseURL string) auth.TokenVerifier {
 	}
 }
 
-func requireBearerToken(verifier auth.TokenVerifier, metadataURL string, next http.Handler) http.Handler {
+type credentialVerifier func(context.Context, string, *http.Request) (*verifiedCredential, error)
+
+func controllerCredentialVerifier(baseURL string, bridge *oauthBridge) credentialVerifier {
+	return func(ctx context.Context, token string, request *http.Request) (*verifiedCredential, error) {
+		if bridge != nil {
+			credential, err := bridge.resolveAccessToken(ctx, token)
+			if err == nil {
+				return credential, nil
+			}
+			if !errors.Is(err, errNotBridgeAccessToken) {
+				if errors.Is(err, errOAuthRecordNotFound) {
+					return nil, auth.ErrInvalidToken
+				}
+				return nil, err
+			}
+		}
+		info, err := controllerTokenVerifier(baseURL)(ctx, token, request)
+		if err != nil {
+			return nil, err
+		}
+		return &verifiedCredential{UpstreamToken: token, UserID: info.UserID}, nil
+	}
+}
+
+func requireBearerToken(verifier credentialVerifier, metadataURL, scope string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
 		fields := strings.Fields(request.Header.Get("Authorization"))
 		if len(fields) != 2 || !strings.EqualFold(fields[0], "Bearer") || fields[1] == "" {
-			writeBearerAuthError(w, metadataURL, "", "bearer token required", http.StatusUnauthorized)
+			writeBearerAuthError(w, metadataURL, scope, "", "bearer token required", http.StatusUnauthorized)
 			return
 		}
 
 		token := fields[1]
-		tokenInfo, err := verifier(request.Context(), token, request)
+		credential, err := verifier(request.Context(), token, request)
 		if err != nil {
 			if errors.Is(err, auth.ErrInvalidToken) {
-				writeBearerAuthError(w, metadataURL, "invalid_token", "invalid bearer token", http.StatusUnauthorized)
+				writeBearerAuthError(w, metadataURL, scope, "invalid_token", "invalid bearer token", http.StatusUnauthorized)
 				return
 			}
-			writeBearerAuthError(w, metadataURL, "", "authentication service unavailable", http.StatusServiceUnavailable)
+			writeBearerAuthError(w, metadataURL, scope, "", "authentication service unavailable", http.StatusServiceUnavailable)
 			return
 		}
-		if tokenInfo == nil || tokenInfo.Expiration.IsZero() || tokenInfo.Expiration.Before(time.Now()) {
-			writeBearerAuthError(w, metadataURL, "invalid_token", "invalid bearer token", http.StatusUnauthorized)
+		if credential == nil || credential.UpstreamToken == "" {
+			writeBearerAuthError(w, metadataURL, scope, "invalid_token", "invalid bearer token", http.StatusUnauthorized)
 			return
 		}
 
-		ctx := context.WithValue(request.Context(), bearerTokenContextKey{}, token)
+		ctx := context.WithValue(request.Context(), verifiedCredentialContextKey{}, credential)
 		next.ServeHTTP(w, request.WithContext(ctx))
 	})
 }
 
-func writeBearerAuthError(w http.ResponseWriter, metadataURL, oauthError, message string, status int) {
+func writeBearerAuthError(w http.ResponseWriter, metadataURL, scope, oauthError, message string, status int) {
 	challenge := fmt.Sprintf("Bearer resource_metadata=%q", metadataURL)
+	if scope != "" {
+		challenge += fmt.Sprintf(", scope=%q", scope)
+	}
 	if oauthError != "" {
 		challenge += fmt.Sprintf(", error=%q", oauthError)
 	}

@@ -150,6 +150,35 @@ func TestHandleToolsList(t *testing.T) {
 	}
 }
 
+func TestOAuthScopesLimitToolSurface(t *testing.T) {
+	readOnly, err := newServerWithTokenAndScopes("https://api.pipeops.test", "sat_test", []string{"api:read"})
+	if err != nil {
+		t.Fatalf("create read-only server: %v", err)
+	}
+	if !readOnly.toolAllowed("list_projects") {
+		t.Fatal("api:read should allow list_projects")
+	}
+	if readOnly.toolAllowed("create_project") {
+		t.Fatal("api:read should not allow create_project")
+	}
+
+	write, err := newServerWithTokenAndScopes("https://api.pipeops.test", "sat_test", []string{"api:write"})
+	if err != nil {
+		t.Fatalf("create write server: %v", err)
+	}
+	if !write.toolAllowed("list_projects") || !write.toolAllowed("create_project") {
+		t.Fatal("api:write should allow read and write tools")
+	}
+
+	directBearer, err := newServerWithTokenAndScopes("https://api.pipeops.test", "sat_test", nil)
+	if err != nil {
+		t.Fatalf("create direct Bearer server: %v", err)
+	}
+	if !directBearer.toolAllowed("create_project") {
+		t.Fatal("direct Bearer mode should preserve the controller-authorized tool surface")
+	}
+}
+
 func TestHandleToolsListSchemas(t *testing.T) {
 	server := &Server{}
 	result := server.handleToolsList()

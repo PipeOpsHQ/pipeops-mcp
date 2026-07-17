@@ -16,6 +16,9 @@ func (s *Server) newSDKServer() *sdkmcp.Server {
 
 	for _, definition := range s.toolDefinitions() {
 		definition := definition
+		if !s.toolAllowed(definition.tool.Name) {
+			continue
+		}
 		annotations := annotationsForTool(definition.tool.Name)
 		server.AddTool(&sdkmcp.Tool{
 			Name:        definition.tool.Name,

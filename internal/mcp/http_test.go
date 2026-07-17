@@ -19,12 +19,39 @@ func TestLoadHTTPConfigFromEnvUsesCanonicalPublicURL(t *testing.T) {
 	t.Setenv("PIPEOPS_HTTP_ADDR", "")
 	t.Setenv("PIPEOPS_BASE_URL", "")
 	t.Setenv("PIPEOPS_MCP_PUBLIC_URL", "")
+	t.Setenv("PIPEOPS_OAUTH_MODE", "")
 	t.Setenv("PIPEOPS_OAUTH_ISSUER", "")
+	t.Setenv("PIPEOPS_OAUTH_REDIS_URL", "")
+	t.Setenv("PIPEOPS_OAUTH_ENCRYPTION_KEY", "")
 	t.Setenv("PIPEOPS_MCP_SCOPES", "")
 
 	config := LoadHTTPConfigFromEnv()
 	if config.ResourceURL != "https://mcp.pipeops.app/mcp" {
 		t.Fatalf("ResourceURL = %q, want canonical .app URL", config.ResourceURL)
+	}
+}
+
+func TestHTTPHandlerBridgeModeRequiresProductionSecrets(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewHTTPHandler(HTTPConfig{
+		BaseURL:     "https://api.pipeops.test",
+		ResourceURL: "https://mcp.pipeops.test/mcp",
+		OAuthMode:   "bridge",
+	})
+	if err == nil || !strings.Contains(err.Error(), "PIPEOPS_OAUTH_REDIS_URL") {
+		t.Fatalf("missing Redis error = %v", err)
+	}
+
+	_, err = NewHTTPHandler(HTTPConfig{
+		BaseURL:            "https://api.pipeops.test",
+		ResourceURL:        "https://mcp.pipeops.test/mcp",
+		OAuthMode:          "bridge",
+		OAuthEncryptionKey: "invalid",
+		oauthStore:         newMemoryOAuthStore(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "base64-encoded 32-byte key") {
+		t.Fatalf("invalid encryption key error = %v", err)
 	}
 }
 
@@ -34,6 +61,7 @@ func TestHTTPHandlerPublishesOAuthProtectedResourceMetadata(t *testing.T) {
 	handler, err := NewHTTPHandler(HTTPConfig{
 		BaseURL:             "https://api.pipeops.test",
 		ResourceURL:         "https://mcp.pipeops.test/mcp",
+		OAuthMode:           "external",
 		AuthorizationServer: "https://console.pipeops.test",
 		Scopes:              []string{"api:read", "api:write"},
 	})
@@ -96,7 +124,7 @@ func TestHTTPHandlerRequiresBearerAuthentication(t *testing.T) {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
 	challenge := recorder.Header().Get("WWW-Authenticate")
-	if challenge != `Bearer resource_metadata="https://mcp.pipeops.test/.well-known/oauth-protected-resource"` {
+	if challenge != `Bearer resource_metadata="https://mcp.pipeops.test/.well-known/oauth-protected-resource", scope="api:read"` {
 		t.Fatalf("WWW-Authenticate = %q", challenge)
 	}
 	if got := recorder.Header().Get("X-Content-Type-Options"); got != "nosniff" {
