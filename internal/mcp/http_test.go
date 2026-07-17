@@ -15,6 +15,19 @@ import (
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+func TestLoadHTTPConfigFromEnvUsesCanonicalPublicURL(t *testing.T) {
+	t.Setenv("PIPEOPS_HTTP_ADDR", "")
+	t.Setenv("PIPEOPS_BASE_URL", "")
+	t.Setenv("PIPEOPS_MCP_PUBLIC_URL", "")
+	t.Setenv("PIPEOPS_OAUTH_ISSUER", "")
+	t.Setenv("PIPEOPS_MCP_SCOPES", "")
+
+	config := LoadHTTPConfigFromEnv()
+	if config.ResourceURL != "https://mcp.pipeops.app/mcp" {
+		t.Fatalf("ResourceURL = %q, want canonical .app URL", config.ResourceURL)
+	}
+}
+
 func TestHTTPHandlerPublishesOAuthProtectedResourceMetadata(t *testing.T) {
 	t.Parallel()
 

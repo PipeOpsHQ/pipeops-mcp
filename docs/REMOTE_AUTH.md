@@ -29,11 +29,11 @@ Required runtime settings:
 PIPEOPS_TRANSPORT=http
 PIPEOPS_HTTP_ADDR=:8080
 PIPEOPS_BASE_URL=https://api.pipeops.io
-PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.io/mcp
+PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp
 PIPEOPS_OAUTH_ISSUER=https://api.pipeops.io
 ```
 
-Route `https://mcp.pipeops.io` to port 8080 and terminate TLS at the ingress or
+Route `https://mcp.pipeops.app` to port 8080 and terminate TLS at the ingress or
 load balancer. Do not set a shared `PIPEOPS_TOKEN` in hosted mode; every customer
 supplies their own Bearer token. Use `/healthz` for health probes.
 
@@ -42,7 +42,7 @@ Customer setup for Phase 1:
 ```bash
 export PIPEOPS_TOKEN="sat_your_token_here"
 codex mcp add pipeops \
-  --url https://mcp.pipeops.io/mcp \
+  --url https://mcp.pipeops.app/mcp \
   --bearer-token-env-var PIPEOPS_TOKEN
 ```
 
@@ -80,9 +80,9 @@ compatible with the later browser flow.
 ## Acceptance checks
 
 ```bash
-curl -i https://mcp.pipeops.io/.well-known/oauth-protected-resource
-curl -i https://mcp.pipeops.io/healthz
-curl -i -X POST https://mcp.pipeops.io/mcp
+curl -i https://mcp.pipeops.app/.well-known/oauth-protected-resource
+curl -i https://mcp.pipeops.app/healthz
+curl -i -X POST https://mcp.pipeops.app/mcp
 ```
 
 The unauthenticated MCP request must return `401` and a `WWW-Authenticate:
