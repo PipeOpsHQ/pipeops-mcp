@@ -444,7 +444,7 @@ func (b *oauthBridge) completeAuthorization(w http.ResponseWriter, r *http.Reque
 	}
 	info, err := controllerTokenVerifier(b.baseURL)(r.Context(), serviceToken, r)
 	if err != nil || info == nil || info.UserID == "" {
-		b.renderConsentPage(w, authorization, "The service token is invalid, expired, or unavailable.")
+		b.renderConsentPage(w, authorization, "The service token could not be authorized. Use an active MCP token with api:read access.")
 		return
 	}
 	consumed, err := b.store.Consume(r.Context(), oauthLookupKey("request", requestID))
