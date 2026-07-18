@@ -377,9 +377,22 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		requiredFields[field] = true
 	}
 
-	for _, field := range []string{"name", "server_id", "environment_id", "repository", "branch"} {
+	for _, field := range []string{"name", "cluster_uuid", "environment_uuid", "repository", "branch", "source", "username"} {
 		if !requiredFields[field] {
 			t.Errorf("Expected create_project to require %s", field)
+		}
+	}
+
+	createProjectProperties, ok := createProject.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected create_project properties schema")
+	}
+	for _, field := range []string{
+		"cluster_uuid", "server_id", "environment_uuid", "workspace_id",
+		"build_method", "build_command", "run_command", "port", "env_vars", "build_settings",
+	} {
+		if _, ok := createProjectProperties[field]; !ok {
+			t.Errorf("Expected create_project to expose %s", field)
 		}
 	}
 
