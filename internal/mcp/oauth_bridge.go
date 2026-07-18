@@ -647,7 +647,7 @@ func (b *oauthBridge) requestConsoleToken(ctx context.Context, values map[string
 	if err != nil {
 		return consoleCredential{}, fmt.Errorf("send PipeOps token request: %w", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return consoleCredential{}, errors.New("PipeOps token exchange was rejected")
 	}
@@ -1339,10 +1339,3 @@ func containsString(values []string, candidate string) bool {
 	return false
 }
 
-func authorizationRedirectHost(value string) string {
-	parsed, err := url.Parse(value)
-	if err != nil {
-		return "the registered client"
-	}
-	return parsed.Host
-}

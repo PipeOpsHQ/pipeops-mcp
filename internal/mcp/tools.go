@@ -68,20 +68,47 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "create_project",
-				Description: "Create a new project",
+				Description: "Create a new project via POST /project/create (clusterUUID + environment_uuid contract)",
 				InputSchema: objectSchema(map[string]interface{}{
-					"name":           stringProperty("The project name"),
-					"description":    stringProperty("Optional project description"),
-					"server_id":      stringProperty("The server ID that will host the project"),
-					"environment_id": stringProperty("The environment ID for the project"),
-					"repository":     stringProperty("Repository URL for the project source"),
-					"branch":         stringProperty("Repository branch to deploy"),
-					"build_command":  stringProperty("Optional build command"),
-					"start_command":  stringProperty("Optional start command"),
-					"port":           integerProperty("Optional application port"),
-					"framework":      stringProperty("Optional framework name"),
-					"env_vars":       objectProperty("Optional environment variables keyed by name", true),
-				}, "name", "server_id", "environment_id", "repository", "branch"),
+					"name":             stringProperty("The project name"),
+					"username":         stringProperty("VCS username/org that owns the repository (e.g. github org or user)"),
+					"source":           stringProperty("Source provider: github | gitlab | bitbucket | image (default: github)"),
+					"repository":       stringProperty("Repository URL for the project source"),
+					"branch":           stringProperty("Repository branch to deploy"),
+					"cluster_uuid":     stringProperty("Cluster UUID that will host the project (preferred; maps to clusterUUID)"),
+					"clusterUUID":      stringProperty("Alias for cluster_uuid (controller JSON key)"),
+					"server_id":        stringProperty("Legacy alias for cluster_uuid (soft migration)"),
+					"environment_uuid": stringProperty("Environment UUID for the project"),
+					"environment_id":   stringProperty("Legacy alias for environment_uuid (soft migration)"),
+					"environment":      stringProperty("Environment name/slug (default: development)"),
+					"workspace_id":     stringProperty("Workspace UUID/ID (maps to workspace_uuid; defaults to first workspace if omitted)"),
+					"workspace_uuid":   stringProperty("Alias for workspace_id (controller JSON key)"),
+					"commit_url":       stringProperty("Optional commit URL"),
+					"commit_sha":       stringProperty("Optional commit SHA"),
+					"language":         stringProperty("Optional repository language (maps to repositoryLanguage)"),
+					"framework":        stringProperty("Optional framework name"),
+					"build_method":     stringProperty("Optional build method (e.g. nodejs, docker, go)"),
+					"build_command":    stringProperty("Optional build command"),
+					"run_command":      stringProperty("Optional run/start command"),
+					"start_command":    stringProperty("Legacy alias for run_command"),
+					"port":             integerProperty("Optional application port (maps to networkSettings)"),
+					"protocol":         stringProperty("Optional network protocol for port (default: HTTP)"),
+					"env_vars":         objectProperty("Optional environment variables as key→value map (maps to envVariables[])", true),
+					"build_settings": objectProperty("Optional nested buildSettings object (build_method, build_command, run_command, worker, type, …)", map[string]interface{}{
+						"type":             map[string]interface{}{"type": "string"},
+						"build_method":     map[string]interface{}{"type": "string"},
+						"buildMethod":      map[string]interface{}{"type": "string"},
+						"build_command":    map[string]interface{}{"type": "string"},
+						"buildCommand":     map[string]interface{}{"type": "string"},
+						"run_command":      map[string]interface{}{"type": "string"},
+						"runCommand":       map[string]interface{}{"type": "string"},
+						"worker":           map[string]interface{}{"type": "boolean"},
+						"build_path":       map[string]interface{}{"type": "string"},
+						"build_directory":  map[string]interface{}{"type": "string"},
+						"docker_image_url": map[string]interface{}{"type": "string"},
+						"dockerImageURL":   map[string]interface{}{"type": "string"},
+					}),
+				}, "name", "cluster_uuid", "environment_uuid", "repository", "branch", "source", "username"),
 			},
 			handler: s.createProjectTool,
 		},
@@ -1234,8 +1261,13 @@ func normalizeVCSProvider(provider string) (string, error) {
 }
 
 func (s *Server) resolveDefaultWorkspaceID(ctx context.Context, args map[string]interface{}) (string, error) {
-	if workspaceID, ok := args["workspace_id"].(string); ok && workspaceID != "" {
-		return workspaceID, nil
+	// Prefer explicit args (agents may pass either key).
+	if ws := firstNonEmptyString(
+		optionalStringArg(args, "workspace_id"),
+		optionalStringArg(args, "workspace_uuid"),
+		optionalStringArg(args, "workspaceUUID"),
+	); ws != "" {
+		return ws, nil
 	}
 
 	resp, _, err := s.client.Workspaces.List(ctx)
@@ -1263,8 +1295,12 @@ func (s *Server) resolveDefaultWorkspaceUUID(ctx context.Context, args map[strin
 		return "", err
 	}
 
-	explicitWorkspaceID, hasExplicitWorkspace := args["workspace_id"].(string)
-	if !hasExplicitWorkspace || strings.TrimSpace(explicitWorkspaceID) == "" {
+	explicitWorkspaceID := firstNonEmptyString(
+		optionalStringArg(args, "workspace_id"),
+		optionalStringArg(args, "workspace_uuid"),
+		optionalStringArg(args, "workspaceUUID"),
+	)
+	if explicitWorkspaceID == "" {
 		return workspaceID, nil
 	}
 	if isLikelyUUID(workspaceID) {
@@ -3307,31 +3343,286 @@ func (s *Server) getProjectTool(ctx context.Context, args map[string]interface{}
 }
 
 func (s *Server) createProjectTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	var req pipeops.CreateProjectRequest
-	if err := decodeArguments(args, &req); err != nil {
+	name, err := requiredString(args, "name")
+	if err != nil {
 		return nil, err
 	}
-	if req.Name == "" {
-		return nil, fmt.Errorf("name is required")
+	username, err := requiredString(args, "username")
+	if err != nil {
+		return nil, err
 	}
-	if req.ServerID == "" {
-		return nil, fmt.Errorf("server_id is required")
+	source, err := requiredString(args, "source")
+	if err != nil {
+		return nil, err
 	}
-	if req.EnvironmentID == "" {
-		return nil, fmt.Errorf("environment_id is required")
+	repository, err := requiredString(args, "repository")
+	if err != nil {
+		return nil, err
 	}
-	if req.Repository == "" {
-		return nil, fmt.Errorf("repository is required")
-	}
-	if req.Branch == "" {
-		return nil, fmt.Errorf("branch is required")
+	branch, err := requiredString(args, "branch")
+	if err != nil {
+		return nil, err
 	}
 
-	resp, _, err := s.client.Projects.Create(ctx, &req)
+	clusterUUID := firstNonEmptyString(
+		optionalStringArg(args, "cluster_uuid"),
+		optionalStringArg(args, "clusterUUID"),
+		optionalStringArg(args, "server_id"), // legacy alias
+	)
+	if clusterUUID == "" {
+		return nil, fmt.Errorf("cluster_uuid is required (server_id is accepted as a legacy alias)")
+	}
+
+	envUUID := firstNonEmptyString(
+		optionalStringArg(args, "environment_uuid"),
+		optionalStringArg(args, "environment_id"), // legacy alias
+	)
+	if envUUID == "" {
+		return nil, fmt.Errorf("environment_uuid is required (environment_id is accepted as a legacy alias)")
+	}
+
+	environment := optionalStringArg(args, "environment")
+	if environment == "" {
+		environment = "development"
+	}
+
+	// workspace_uuid is required by POST /project/create — never omit.
+	// Resolve from workspace_id / workspace_uuid args, else first workspace.
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w", err)
+	}
+	if strings.TrimSpace(workspaceUUID) == "" {
+		return nil, fmt.Errorf("workspace_uuid is required")
+	}
+
+	buildMethod := optionalStringArg(args, "build_method")
+	buildCommand := optionalStringArg(args, "build_command")
+	runCommand := firstNonEmptyString(
+		optionalStringArg(args, "run_command"),
+		optionalStringArg(args, "start_command"), // legacy alias
+	)
+
+	buildSettings := pipeops.CreateProjectBuildSettings{
+		BuildMethod:  buildMethod,
+		BuildCommand: buildCommand,
+		RunCommand:   runCommand,
+	}
+	if nested, ok := args["build_settings"].(map[string]interface{}); ok && nested != nil {
+		mergeCreateProjectBuildSettings(&buildSettings, nested)
+	}
+
+	// Worker defaults to false when build settings are present (controller contract).
+	worker := false
+	if buildSettings.Worker == nil {
+		buildSettings.Worker = &worker
+	}
+
+	var networkSettings []pipeops.CreateProjectNetworkSetting
+	if port, ok := optionalInt32Arg(args, "port"); ok && port > 0 {
+		protocol := optionalStringArg(args, "protocol")
+		if protocol == "" {
+			protocol = "HTTP"
+		}
+		networkSettings = []pipeops.CreateProjectNetworkSetting{
+			{Port: port, Protocol: protocol},
+		}
+	}
+
+	envVariables := createProjectEnvVarsFromArgs(args)
+
+	req := &pipeops.CreateProjectRequest{
+		Name:               name,
+		Username:           username,
+		Source:             source,
+		Repository:         repository,
+		Branch:             branch,
+		ClusterUUID:        clusterUUID,
+		EnvironmentUUID:    envUUID,
+		Environment:        environment,
+		WorkspaceUUID:      workspaceUUID,
+		CommitURL:          optionalStringArg(args, "commit_url"),
+		CommitSha:          optionalStringArg(args, "commit_sha"),
+		RepositoryLanguage: firstNonEmptyString(optionalStringArg(args, "language"), optionalStringArg(args, "repository_language")),
+		RawLanguage:        optionalStringArg(args, "raw_language"),
+		Framework:          optionalStringArg(args, "framework"),
+		GitlabID:           optionalStringArg(args, "gitlab_id"),
+		ClusterVersion:     optionalStringArg(args, "cluster_version"),
+		CustomDomainName:   optionalStringArg(args, "custom_domain_name"),
+		PostStart:          optionalStringArg(args, "post_start"),
+		WorkerRunCommand:   optionalStringArg(args, "worker_run_command"),
+		BuildSettings:      buildSettings,
+		NetworkSettings:    networkSettings,
+		EnvVariables:       envVariables,
+		Kind:               optionalStringArg(args, "kind"),
+		ProjectType:        firstNonEmptyString(optionalStringArg(args, "project_type"), optionalStringArg(args, "projectType")),
+	}
+
+	resp, _, err := s.client.Projects.Create(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	return jsonResult(resp)
+}
+
+func firstNonEmptyString(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+func optionalStringArg(args map[string]interface{}, key string) string {
+	if args == nil {
+		return ""
+	}
+	value, ok := args[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	default:
+		return strings.TrimSpace(fmt.Sprint(v))
+	}
+}
+
+func optionalInt32Arg(args map[string]interface{}, key string) (int32, bool) {
+	if args == nil {
+		return 0, false
+	}
+	value, ok := args[key]
+	if !ok || value == nil {
+		return 0, false
+	}
+	switch v := value.(type) {
+	case int:
+		return int32(v), true
+	case int32:
+		return v, true
+	case int64:
+		return int32(v), true
+	case float64:
+		return int32(v), true
+	case float32:
+		return int32(v), true
+	case json.Number:
+		i, err := v.Int64()
+		if err != nil {
+			return 0, false
+		}
+		return int32(i), true
+	default:
+		return 0, false
+	}
+}
+
+func createProjectEnvVarsFromArgs(args map[string]interface{}) []pipeops.CreateProjectEnvVar {
+	// Prefer map form env_vars; also accept env_variables array of {key,value}.
+	if raw, ok := args["env_vars"]; ok && raw != nil {
+		switch m := raw.(type) {
+		case map[string]interface{}:
+			out := make([]pipeops.CreateProjectEnvVar, 0, len(m))
+			for k, v := range m {
+				out = append(out, pipeops.CreateProjectEnvVar{
+					Key:   k,
+					Value: fmt.Sprint(v),
+				})
+			}
+			return out
+		case map[string]string:
+			out := make([]pipeops.CreateProjectEnvVar, 0, len(m))
+			for k, v := range m {
+				out = append(out, pipeops.CreateProjectEnvVar{Key: k, Value: v})
+			}
+			return out
+		}
+	}
+
+	if raw, ok := args["env_variables"].([]interface{}); ok {
+		out := make([]pipeops.CreateProjectEnvVar, 0, len(raw))
+		for _, item := range raw {
+			entry, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			key := firstNonEmptyString(optionalStringArg(entry, "key"), optionalStringArg(entry, "Key"))
+			if key == "" {
+				continue
+			}
+			value := firstNonEmptyString(optionalStringArg(entry, "value"), optionalStringArg(entry, "Value"))
+			out = append(out, pipeops.CreateProjectEnvVar{Key: key, Value: value})
+		}
+		return out
+	}
+
+	// Never omit: empty slice is fine (SDK also normalizes nil → []).
+	return []pipeops.CreateProjectEnvVar{}
+}
+
+func mergeCreateProjectBuildSettings(dst *pipeops.CreateProjectBuildSettings, nested map[string]interface{}) {
+	if dst == nil || nested == nil {
+		return
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "type"), optionalStringArg(nested, "Type")); v != "" {
+		dst.Type = v
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "build_method"), optionalStringArg(nested, "buildMethod")); v != "" {
+		dst.BuildMethod = v
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "build_command"), optionalStringArg(nested, "buildCommand")); v != "" {
+		dst.BuildCommand = v
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "run_command"), optionalStringArg(nested, "runCommand")); v != "" {
+		dst.RunCommand = v
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "build_path"), optionalStringArg(nested, "buildPath")); v != "" {
+		dst.BuildPath = v
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "build_directory"), optionalStringArg(nested, "buildDirectory")); v != "" {
+		dst.BuildDirectory = v
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "builder_host"), optionalStringArg(nested, "builderHost")); v != "" {
+		dst.BuilderHost = v
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "builder_id"), optionalStringArg(nested, "builderID")); v != "" {
+		dst.BuilderID = v
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "build_version"), optionalStringArg(nested, "buildVersion")); v != "" {
+		dst.BuildVersion = v
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "docker_image_url"), optionalStringArg(nested, "dockerImageURL")); v != "" {
+		dst.DockerImageURL = v
+	}
+	if v := firstNonEmptyString(optionalStringArg(nested, "docker_path"), optionalStringArg(nested, "dockerPath")); v != "" {
+		dst.DockerPath = v
+	}
+	if worker, ok := nested["worker"].(bool); ok {
+		dst.Worker = &worker
+	}
+	if skip, ok := nested["skip_build"].(bool); ok {
+		dst.SkipBuild = skip
+	} else if skip, ok := nested["skipBuild"].(bool); ok {
+		dst.SkipBuild = skip
+	}
+	if skip, ok := nested["skip_commit"].(bool); ok {
+		dst.SkipCommit = skip
+	} else if skip, ok := nested["skipCommit"].(bool); ok {
+		dst.SkipCommit = skip
+	}
+	if use, ok := nested["use_docker_image"].(bool); ok {
+		dst.UseDockerImage = use
+	} else if use, ok := nested["useDockerImage"].(bool); ok {
+		dst.UseDockerImage = use
+	}
+	if noCache, ok := nested["no_cache"].(bool); ok {
+		dst.NoCache = noCache
+	} else if noCache, ok := nested["noCache"].(bool); ok {
+		dst.NoCache = noCache
+	}
 }
 
 func (s *Server) updateProjectTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {

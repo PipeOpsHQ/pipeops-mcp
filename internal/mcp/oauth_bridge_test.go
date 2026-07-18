@@ -694,7 +694,7 @@ func completeConsoleAuthorization(t *testing.T, serverURL, consoleLocation, cons
 	if err != nil {
 		t.Fatalf("complete Console authorization: %v", err)
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 	if response.StatusCode != http.StatusFound {
 		body, _ := io.ReadAll(response.Body)
 		t.Fatalf("Console callback status = %d; body = %s", response.StatusCode, body)
