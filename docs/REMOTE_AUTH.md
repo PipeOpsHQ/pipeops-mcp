@@ -84,9 +84,10 @@ that require the metadata field.
 ## Credential and scope model
 
 The consent page accepts only a `sat_...` PipeOps workspace service token and
-validates it with `GET /profile/data`. The token is encrypted using AES-256-GCM
-before it is written to the configured store. OAuth access, refresh, and
-authorization codes are stored under SHA-256 lookup keys, so their plaintext
+validates it with the workspace-scoped `GET /workspace` route. The response must
+contain exactly the token's one bound workspace. The token is encrypted using
+AES-256-GCM before it is written to the configured store. OAuth access, refresh,
+and authorization codes are stored under SHA-256 lookup keys, so their plaintext
 values are not used as database keys.
 
 The bridge exposes two scopes:

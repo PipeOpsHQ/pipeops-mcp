@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -61,6 +62,62 @@ func TestHTTPDefaultsSelectOAuthStore(t *testing.T) {
 			config := withHTTPDefaults(test.config)
 			if config.OAuthStore != test.wantStore {
 				t.Fatalf("OAuthStore = %q, want %q", config.OAuthStore, test.wantStore)
+			}
+		})
+	}
+}
+
+func TestControllerTokenVerifierValidatesServiceTokenViaBoundWorkspace(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/workspace" {
+			http.Error(w, "unexpected path", http.StatusNotFound)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer sat_valid" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"success":true,"message":"ok","data":[{"uuid":"workspace-123","name":"Test"}]}`)
+	}))
+	defer api.Close()
+
+	info, err := controllerTokenVerifier(api.URL)(context.Background(), "sat_valid", nil)
+	if err != nil {
+		t.Fatalf("verify service token: %v", err)
+	}
+	if info == nil || info.UserID != "workspace:workspace-123" {
+		t.Fatalf("service token identity = %#v", info)
+	}
+}
+
+func TestControllerTokenVerifierRejectsServiceTokenWithoutOneBoundWorkspace(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+	}{
+		{name: "unauthorized", statusCode: http.StatusUnauthorized, body: `{"success":false}`},
+		{name: "no workspace", statusCode: http.StatusOK, body: `{"success":true,"data":[]}`},
+		{name: "multiple workspaces", statusCode: http.StatusOK, body: `{"success":true,"data":[{"uuid":"one"},{"uuid":"two"}]}`},
+		{name: "missing workspace UUID", statusCode: http.StatusOK, body: `{"success":true,"data":[{"name":"missing"}]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/workspace" {
+					http.Error(w, "unexpected path", http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(test.statusCode)
+				_, _ = io.WriteString(w, test.body)
+			}))
+			defer api.Close()
+
+			info, err := controllerTokenVerifier(api.URL)(context.Background(), "sat_invalid", nil)
+			if info != nil || !errors.Is(err, auth.ErrInvalidToken) {
+				t.Fatalf("service token result = info %#v err %v, want invalid token", info, err)
 			}
 		})
 	}

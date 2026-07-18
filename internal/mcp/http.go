@@ -315,6 +315,25 @@ func controllerTokenVerifier(baseURL string) auth.TokenVerifier {
 			return nil, errors.New("token validation unavailable")
 		}
 		client.SetToken(token)
+		if strings.HasPrefix(token, "sat_") || strings.HasPrefix(token, "clt_") {
+			workspaces, response, err := client.Workspaces.List(ctx)
+			if err != nil {
+				if response != nil && (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+					return nil, auth.ErrInvalidToken
+				}
+				return nil, errors.New("token validation unavailable")
+			}
+			if !strings.EqualFold(workspaces.Status, "success") && !strings.EqualFold(workspaces.Status, "ok") {
+				return nil, auth.ErrInvalidToken
+			}
+			if len(workspaces.Data.Workspaces) != 1 || workspaces.Data.Workspaces[0].UUID == "" {
+				return nil, auth.ErrInvalidToken
+			}
+			return &auth.TokenInfo{
+				Expiration: time.Now().Add(5 * time.Minute),
+				UserID:     "workspace:" + workspaces.Data.Workspaces[0].UUID,
+			}, nil
+		}
 
 		profile, response, err := client.Users.GetProfile(ctx)
 		if err != nil {
