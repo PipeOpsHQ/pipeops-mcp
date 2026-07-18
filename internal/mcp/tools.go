@@ -39,6 +39,159 @@ type toolDefinition struct {
 	handler func(context.Context, map[string]interface{}) (interface{}, error)
 }
 
+type listGitOpsApplicationsArgs struct {
+	Page  int `json:"page,omitempty"`
+	Limit int `json:"limit,omitempty"`
+}
+
+type gitOpsApplicationUUIDArgs struct {
+	ApplicationUUID string `json:"application_uuid"`
+}
+
+type createGitOpsApplicationArgs struct {
+	Name                string `json:"name"`
+	RepoURL             string `json:"repo_url"`
+	ProjectID           *uint  `json:"project_id,omitempty"`
+	EnvironmentID       *uint  `json:"environment_id,omitempty"`
+	Branch              string `json:"branch,omitempty"`
+	Path                string `json:"path,omitempty"`
+	TargetRevision      string `json:"target_revision,omitempty"`
+	ManifestType        string `json:"manifest_type,omitempty"`
+	HealthCheckEnabled  *bool  `json:"health_check_enabled,omitempty"`
+	HealthCheckInterval int    `json:"health_check_interval,omitempty"`
+	AutoSyncPrune       *bool  `json:"auto_sync_prune,omitempty"`
+	AutoSyncSelfHeal    *bool  `json:"auto_sync_self_heal,omitempty"`
+	AutoSyncAllowEmpty  *bool  `json:"auto_sync_allow_empty,omitempty"`
+}
+
+type updateGitOpsApplicationArgs struct {
+	ApplicationUUID     string `json:"application_uuid"`
+	Name                string `json:"name,omitempty"`
+	Branch              string `json:"branch,omitempty"`
+	Path                string `json:"path,omitempty"`
+	TargetRevision      string `json:"target_revision,omitempty"`
+	HealthCheckEnabled  *bool  `json:"health_check_enabled,omitempty"`
+	HealthCheckInterval *int   `json:"health_check_interval,omitempty"`
+	AutoSyncPrune       *bool  `json:"auto_sync_prune,omitempty"`
+	AutoSyncSelfHeal    *bool  `json:"auto_sync_self_heal,omitempty"`
+	AutoSyncAllowEmpty  *bool  `json:"auto_sync_allow_empty,omitempty"`
+}
+
+type syncGitOpsApplicationArgs struct {
+	ApplicationUUID string `json:"application_uuid"`
+	Revision        string `json:"revision,omitempty"`
+	Prune           bool   `json:"prune,omitempty"`
+	DryRun          bool   `json:"dry_run,omitempty"`
+}
+
+type getGitOpsHistoryArgs struct {
+	ApplicationUUID string `json:"application_uuid"`
+	Page            int    `json:"page,omitempty"`
+	Limit           int    `json:"limit,omitempty"`
+}
+
+type listProjectGroupsArgs struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+	Offset      int    `json:"offset,omitempty"`
+}
+
+type projectGroupUUIDArgs struct {
+	GroupUUID   string `json:"group_uuid"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type createProjectGroupArgs struct {
+	Name                   string `json:"name"`
+	DefaultClusterUUID     string `json:"default_cluster_uuid,omitempty"`
+	DefaultEnvironmentUUID string `json:"default_environment_uuid,omitempty"`
+	WorkspaceID            string `json:"workspace_id,omitempty"`
+}
+
+type updateProjectGroupArgs struct {
+	GroupUUID              string  `json:"group_uuid"`
+	Name                   *string `json:"name,omitempty"`
+	DefaultClusterUUID     *string `json:"default_cluster_uuid,omitempty"`
+	DefaultEnvironmentUUID *string `json:"default_environment_uuid,omitempty"`
+	WorkspaceID            string  `json:"workspace_id,omitempty"`
+}
+
+type attachProjectGroupMemberArgs struct {
+	GroupUUID      string `json:"group_uuid"`
+	MemberType     string `json:"member_type"`
+	MemberUUID     string `json:"member_uuid"`
+	IncludeSession *bool  `json:"include_session,omitempty"`
+	Move           bool   `json:"move,omitempty"`
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+}
+
+type detachProjectGroupMemberArgs struct {
+	GroupUUID      string `json:"group_uuid"`
+	MemberType     string `json:"member_type"`
+	MemberUUID     string `json:"member_uuid"`
+	IncludeSession *bool  `json:"include_session,omitempty"`
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+}
+
+type putProjectGroupSharedEnvArgs struct {
+	GroupUUID      string                             `json:"group_uuid"`
+	Variables      []pipeops.ProjectGroupSharedEnvVar `json:"variables"`
+	Inject         bool                               `json:"inject,omitempty"`
+	Overwrite      bool                               `json:"overwrite,omitempty"`
+	Redeploy       bool                               `json:"redeploy,omitempty"`
+	KeepReferences bool                               `json:"keep_references,omitempty"`
+	WorkspaceID    string                             `json:"workspace_id,omitempty"`
+}
+
+type injectProjectGroupSharedEnvArgs struct {
+	GroupUUID      string   `json:"group_uuid"`
+	Overwrite      bool     `json:"overwrite,omitempty"`
+	Redeploy       bool     `json:"redeploy,omitempty"`
+	MemberUUIDs    []string `json:"member_uuids,omitempty"`
+	KeepReferences bool     `json:"keep_references,omitempty"`
+	WorkspaceID    string   `json:"workspace_id,omitempty"`
+}
+
+type connectProjectGroupServicesArgs struct {
+	GroupUUID    string `json:"group_uuid"`
+	ConsumerType string `json:"consumer_type"`
+	ConsumerUUID string `json:"consumer_uuid"`
+	ProviderType string `json:"provider_type"`
+	ProviderUUID string `json:"provider_uuid"`
+	Overwrite    bool   `json:"overwrite,omitempty"`
+	VariableSet  string `json:"variable_set,omitempty"`
+	WorkspaceID  string `json:"workspace_id,omitempty"`
+}
+
+type resolveProjectGroupMemberArgs struct {
+	MemberType  string `json:"member_type"`
+	MemberUUID  string `json:"member_uuid"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type listProjectGroupCandidatesArgs struct {
+	GroupUUID   string `json:"group_uuid,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+func gitOpsAutomatedSyncPolicy(prune, selfHeal, allowEmpty *bool) *pipeops.GitOpsSyncPolicyRequest {
+	if prune == nil && selfHeal == nil && allowEmpty == nil {
+		return nil
+	}
+	automated := &pipeops.GitOpsAutomatedSyncRequest{}
+	if prune != nil {
+		automated.Prune = *prune
+	}
+	if selfHeal != nil {
+		automated.SelfHeal = *selfHeal
+	}
+	if allowEmpty != nil {
+		automated.AllowEmpty = *allowEmpty
+	}
+	return &pipeops.GitOpsSyncPolicyRequest{Automated: automated}
+}
+
+
 func (s *Server) toolDefinitions() []toolDefinition {
 	return []toolDefinition{
 		{
@@ -1136,6 +1289,317 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				InputSchema: emptySchema(),
 			},
 			handler: s.listInvoicesTool,
+		},
+		{
+			tool: Tool{
+				Name:        "list_gitops_applications",
+				Description: "List GitOps application configurations for the current workspace session",
+				InputSchema: objectSchema(map[string]interface{}{
+					"page":  integerProperty("Optional page number"),
+					"limit": integerProperty("Optional page size"),
+				}),
+			},
+			handler: s.listGitOpsApplicationsTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_gitops_application",
+				Description: "Get a GitOps application configuration by UUID",
+				InputSchema: objectSchema(map[string]interface{}{
+					"application_uuid": stringProperty("The GitOps application UUID"),
+				}, "application_uuid"),
+			},
+			handler: s.getGitOpsApplicationTool,
+		},
+		{
+			tool: Tool{
+				Name:        "create_gitops_application",
+				Description: "Create a GitOps application configuration",
+				InputSchema: objectSchema(map[string]interface{}{
+					"name":                  stringProperty("GitOps application name"),
+					"repo_url":              stringProperty("Git repository URL"),
+					"project_id":            integerProperty("Optional project ID to bind"),
+					"environment_id":        integerProperty("Optional environment ID to bind"),
+					"branch":                stringProperty("Optional git branch"),
+					"path":                  stringProperty("Optional path within the repository"),
+					"target_revision":       stringProperty("Optional target revision (branch, tag, or commit)"),
+					"manifest_type":         stringProperty("Optional manifest type: pipeops or kubernetes"),
+					"health_check_enabled":  booleanProperty("Optional health check enable flag"),
+					"health_check_interval": integerProperty("Optional health check interval in seconds"),
+					"auto_sync_prune":       booleanProperty("Optional automated sync prune setting"),
+					"auto_sync_self_heal":   booleanProperty("Optional automated sync self-heal setting"),
+					"auto_sync_allow_empty": booleanProperty("Optional automated sync allow-empty setting"),
+				}, "name", "repo_url"),
+			},
+			handler: s.createGitOpsApplicationTool,
+		},
+		{
+			tool: Tool{
+				Name:        "update_gitops_application",
+				Description: "Update a GitOps application configuration",
+				InputSchema: objectSchema(map[string]interface{}{
+					"application_uuid":      stringProperty("The GitOps application UUID"),
+					"name":                  stringProperty("Updated application name"),
+					"branch":                stringProperty("Updated git branch"),
+					"path":                  stringProperty("Updated path within the repository"),
+					"target_revision":       stringProperty("Updated target revision"),
+					"health_check_enabled":  booleanProperty("Updated health check enable flag"),
+					"health_check_interval": integerProperty("Updated health check interval in seconds"),
+					"auto_sync_prune":       booleanProperty("Updated automated sync prune setting"),
+					"auto_sync_self_heal":   booleanProperty("Updated automated sync self-heal setting"),
+					"auto_sync_allow_empty": booleanProperty("Updated automated sync allow-empty setting"),
+				}, "application_uuid"),
+			},
+			handler: s.updateGitOpsApplicationTool,
+		},
+		{
+			tool: Tool{
+				Name:        "delete_gitops_application",
+				Description: "Delete a GitOps application configuration",
+				InputSchema: objectSchema(map[string]interface{}{
+					"application_uuid": stringProperty("The GitOps application UUID to delete"),
+				}, "application_uuid"),
+			},
+			handler: s.deleteGitOpsApplicationTool,
+		},
+		{
+			tool: Tool{
+				Name:        "sync_gitops_application",
+				Description: "Trigger a manual sync for a GitOps application",
+				InputSchema: objectSchema(map[string]interface{}{
+					"application_uuid": stringProperty("The GitOps application UUID"),
+					"revision":         stringProperty("Optional revision to sync"),
+					"prune":            booleanProperty("Whether to prune resources during sync"),
+					"dry_run":          booleanProperty("Whether to perform a dry-run sync"),
+				}, "application_uuid"),
+			},
+			handler: s.syncGitOpsApplicationTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_gitops_sync_status",
+				Description: "Get the current sync and health status for a GitOps application",
+				InputSchema: objectSchema(map[string]interface{}{
+					"application_uuid": stringProperty("The GitOps application UUID"),
+				}, "application_uuid"),
+			},
+			handler: s.getGitOpsSyncStatusTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_gitops_diff",
+				Description: "Get the git vs live-state diff for a GitOps application",
+				InputSchema: objectSchema(map[string]interface{}{
+					"application_uuid": stringProperty("The GitOps application UUID"),
+				}, "application_uuid"),
+			},
+			handler: s.getGitOpsDiffTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_gitops_history",
+				Description: "Get paginated sync history for a GitOps application",
+				InputSchema: objectSchema(map[string]interface{}{
+					"application_uuid": stringProperty("The GitOps application UUID"),
+					"page":             integerProperty("Optional page number"),
+					"limit":            integerProperty("Optional page size"),
+				}, "application_uuid"),
+			},
+			handler: s.getGitOpsHistoryTool,
+		},
+		{
+			tool: Tool{
+				Name:        "list_project_groups",
+				Description: "List project groups (unified project plane) for a workspace",
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
+					"limit":        integerProperty("Optional page size"),
+					"offset":       integerProperty("Optional page offset"),
+				}),
+			},
+			handler: s.listProjectGroupsTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_project_group",
+				Description: "Get a project group by UUID",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":   stringProperty("The project group UUID"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid"),
+			},
+			handler: s.getProjectGroupTool,
+		},
+		{
+			tool: Tool{
+				Name:        "create_project_group",
+				Description: "Create an empty project group",
+				InputSchema: objectSchema(map[string]interface{}{
+					"name":                     stringProperty("Project group name"),
+					"default_cluster_uuid":     stringProperty("Optional default cluster UUID"),
+					"default_environment_uuid": stringProperty("Optional default environment UUID"),
+					"workspace_id":             stringProperty("Optional workspace ID or UUID override"),
+				}, "name"),
+			},
+			handler: s.createProjectGroupTool,
+		},
+		{
+			tool: Tool{
+				Name:        "update_project_group",
+				Description: "Update project group metadata",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":               stringProperty("The project group UUID"),
+					"name":                     stringProperty("Updated project group name"),
+					"default_cluster_uuid":     stringProperty("Updated default cluster UUID"),
+					"default_environment_uuid": stringProperty("Updated default environment UUID"),
+					"workspace_id":             stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid"),
+			},
+			handler: s.updateProjectGroupTool,
+		},
+		{
+			tool: Tool{
+				Name:        "delete_project_group",
+				Description: "Delete a project group",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":   stringProperty("The project group UUID to delete"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid"),
+			},
+			handler: s.deleteProjectGroupTool,
+		},
+		{
+			tool: Tool{
+				Name:        "attach_project_group_member",
+				Description: "Attach a project or add-on deployment member to a project group",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":      stringProperty("The project group UUID"),
+					"member_type":     stringProperty("Member type: project or addon_deployment"),
+					"member_uuid":     stringProperty("The member project or add-on deployment UUID"),
+					"include_session": booleanProperty("Optional flag to include the member session"),
+					"move":            booleanProperty("Whether to move the member from another group if already attached"),
+					"workspace_id":    stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid", "member_type", "member_uuid"),
+			},
+			handler: s.attachProjectGroupMemberTool,
+		},
+		{
+			tool: Tool{
+				Name:        "detach_project_group_member",
+				Description: "Detach a member from a project group",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":      stringProperty("The project group UUID"),
+					"member_type":     stringProperty("Member type: project or addon_deployment"),
+					"member_uuid":     stringProperty("The member project or add-on deployment UUID"),
+					"include_session": booleanProperty("Optional flag to include the member session when detaching"),
+					"workspace_id":    stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid", "member_type", "member_uuid"),
+			},
+			handler: s.detachProjectGroupMemberTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_project_group_topology",
+				Description: "Get the topology plane for a project group",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":   stringProperty("The project group UUID"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid"),
+			},
+			handler: s.getProjectGroupTopologyTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_project_group_shared_env",
+				Description: "Get shared environment variables for a project group",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":   stringProperty("The project group UUID"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid"),
+			},
+			handler: s.getProjectGroupSharedEnvTool,
+		},
+		{
+			tool: Tool{
+				Name:        "put_project_group_shared_env",
+				Description: "Replace shared environment variables for a project group",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":      stringProperty("The project group UUID"),
+					"variables":       envVariablesProperty("Shared environment variables to set"),
+					"inject":          booleanProperty("Whether to inject variables into members after upsert"),
+					"overwrite":       booleanProperty("Whether to overwrite existing member env values on inject"),
+					"redeploy":        booleanProperty("Whether to redeploy apps after inject"),
+					"keep_references": booleanProperty("Whether to keep existing env references"),
+					"workspace_id":    stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid", "variables"),
+			},
+			handler: s.putProjectGroupSharedEnvTool,
+		},
+		{
+			tool: Tool{
+				Name:        "inject_project_group_shared_env",
+				Description: "Inject stored project-group shared env into member services",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":      stringProperty("The project group UUID"),
+					"overwrite":       booleanProperty("Whether to overwrite existing member env values"),
+					"redeploy":        booleanProperty("Whether to redeploy apps after inject"),
+					"member_uuids":    stringArrayProperty("Optional subset of member UUIDs to inject into"),
+					"keep_references": booleanProperty("Whether to keep existing env references"),
+					"workspace_id":    stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid"),
+			},
+			handler: s.injectProjectGroupSharedEnvTool,
+		},
+		{
+			tool: Tool{
+				Name:        "connect_project_group_services",
+				Description: "Wire provider connection environment variables into a consumer project in a group",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":    stringProperty("The project group UUID"),
+					"consumer_type": stringProperty("Consumer type (typically project)"),
+					"consumer_uuid": stringProperty("Consumer project UUID"),
+					"provider_type": stringProperty("Provider type (typically addon_deployment)"),
+					"provider_uuid": stringProperty("Provider add-on deployment UUID"),
+					"overwrite":     booleanProperty("Whether to overwrite existing consumer env values"),
+					"variable_set":  stringProperty("Optional variable set name"),
+					"workspace_id":  stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid", "consumer_type", "consumer_uuid", "provider_type", "provider_uuid"),
+			},
+			handler: s.connectProjectGroupServicesTool,
+		},
+		{
+			tool: Tool{
+				Name:        "redeploy_project_group_apps",
+				Description: "Queue redeploys for application (project) members in a project group",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":   stringProperty("The project group UUID"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "group_uuid"),
+			},
+			handler: s.redeployProjectGroupAppsTool,
+		},
+		{
+			tool: Tool{
+				Name:        "resolve_project_group_member",
+				Description: "Resolve which project group a service member belongs to",
+				InputSchema: objectSchema(map[string]interface{}{
+					"member_type":  stringProperty("Member type: project or addon_deployment"),
+					"member_uuid":  stringProperty("The member project or add-on deployment UUID"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "member_type", "member_uuid"),
+			},
+			handler: s.resolveProjectGroupMemberTool,
+		},
+		{
+			tool: Tool{
+				Name:        "list_project_group_candidates",
+				Description: "List projects and add-ons that can be attached to a project group",
+				InputSchema: objectSchema(map[string]interface{}{
+					"group_uuid":   stringProperty("Optional target project group UUID for in-group flags"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}),
+			},
+			handler: s.listProjectGroupCandidatesTool,
 		},
 		{
 			tool: Tool{
@@ -5929,4 +6393,546 @@ func (s *Server) revokeServiceAccountTokenTool(ctx context.Context, args map[str
 		return nil, err
 	}
 	return textResult("Service account token revoked successfully"), nil
+}
+
+func (s *Server) listGitOpsApplicationsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req listGitOpsApplicationsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.GitOps.List(ctx, &pipeops.GitOpsListOptions{
+		Page:  req.Page,
+		Limit: req.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getGitOpsApplicationTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	applicationUUID, err := requiredString(args, "application_uuid")
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.GitOps.Get(ctx, applicationUUID)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) createGitOpsApplicationTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req createGitOpsApplicationArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+	if strings.TrimSpace(req.RepoURL) == "" {
+		return nil, fmt.Errorf("repo_url is required")
+	}
+
+	resp, _, err := s.client.GitOps.Create(ctx, &pipeops.CreateGitOpsConfigRequest{
+		Name:                strings.TrimSpace(req.Name),
+		ProjectID:           req.ProjectID,
+		EnvironmentID:       req.EnvironmentID,
+		RepoURL:             strings.TrimSpace(req.RepoURL),
+		Branch:              strings.TrimSpace(req.Branch),
+		Path:                strings.TrimSpace(req.Path),
+		TargetRevision:      strings.TrimSpace(req.TargetRevision),
+		ManifestType:        strings.TrimSpace(req.ManifestType),
+		SyncPolicy:          gitOpsAutomatedSyncPolicy(req.AutoSyncPrune, req.AutoSyncSelfHeal, req.AutoSyncAllowEmpty),
+		HealthCheckEnabled:  req.HealthCheckEnabled,
+		HealthCheckInterval: req.HealthCheckInterval,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) updateGitOpsApplicationTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req updateGitOpsApplicationArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.ApplicationUUID) == "" {
+		return nil, fmt.Errorf("application_uuid is required")
+	}
+
+	resp, _, err := s.client.GitOps.Update(ctx, strings.TrimSpace(req.ApplicationUUID), &pipeops.UpdateGitOpsConfigRequest{
+		Name:                strings.TrimSpace(req.Name),
+		Branch:              strings.TrimSpace(req.Branch),
+		Path:                strings.TrimSpace(req.Path),
+		TargetRevision:      strings.TrimSpace(req.TargetRevision),
+		SyncPolicy:          gitOpsAutomatedSyncPolicy(req.AutoSyncPrune, req.AutoSyncSelfHeal, req.AutoSyncAllowEmpty),
+		HealthCheckEnabled:  req.HealthCheckEnabled,
+		HealthCheckInterval: req.HealthCheckInterval,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) deleteGitOpsApplicationTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	applicationUUID, err := requiredString(args, "application_uuid")
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := s.client.GitOps.Delete(ctx, applicationUUID); err != nil {
+		return nil, err
+	}
+	return textResult("GitOps application deleted successfully"), nil
+}
+
+func (s *Server) syncGitOpsApplicationTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req syncGitOpsApplicationArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.ApplicationUUID) == "" {
+		return nil, fmt.Errorf("application_uuid is required")
+	}
+
+	resp, _, err := s.client.GitOps.TriggerSync(ctx, strings.TrimSpace(req.ApplicationUUID), &pipeops.TriggerGitOpsSyncRequest{
+		Revision: strings.TrimSpace(req.Revision),
+		Prune:    req.Prune,
+		DryRun:   req.DryRun,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getGitOpsSyncStatusTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	applicationUUID, err := requiredString(args, "application_uuid")
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.GitOps.GetSyncStatus(ctx, applicationUUID)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getGitOpsDiffTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	applicationUUID, err := requiredString(args, "application_uuid")
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.GitOps.GetDiff(ctx, applicationUUID)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getGitOpsHistoryTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req getGitOpsHistoryArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.ApplicationUUID) == "" {
+		return nil, fmt.Errorf("application_uuid is required")
+	}
+
+	resp, _, err := s.client.GitOps.GetHistory(ctx, strings.TrimSpace(req.ApplicationUUID), &pipeops.GitOpsListOptions{
+		Page:  req.Page,
+		Limit: req.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) projectGroupWorkspaceOptions(ctx context.Context, args map[string]interface{}) (*pipeops.ProjectGroupWorkspaceOptions, error) {
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return &pipeops.ProjectGroupWorkspaceOptions{WorkspaceUUID: workspaceUUID}, nil
+}
+
+func (s *Server) listProjectGroupsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req listProjectGroupsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.List(ctx, &pipeops.ProjectGroupListOptions{
+		WorkspaceUUID: workspaceUUID,
+		Limit:         req.Limit,
+		Offset:        req.Offset,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getProjectGroupTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	groupUUID, err := requiredString(args, "group_uuid")
+	if err != nil {
+		return nil, err
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.Get(ctx, groupUUID, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) createProjectGroupTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req createProjectGroupArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	body := &pipeops.CreateProjectGroupRequest{
+		Name: strings.TrimSpace(req.Name),
+	}
+	if clusterUUID := strings.TrimSpace(req.DefaultClusterUUID); clusterUUID != "" {
+		body.DefaultClusterUUID = &clusterUUID
+	}
+	if environmentUUID := strings.TrimSpace(req.DefaultEnvironmentUUID); environmentUUID != "" {
+		body.DefaultEnvironmentUUID = &environmentUUID
+	}
+
+	resp, _, err := s.client.ProjectGroups.Create(ctx, body, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) updateProjectGroupTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req updateProjectGroupArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GroupUUID) == "" {
+		return nil, fmt.Errorf("group_uuid is required")
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.Update(ctx, strings.TrimSpace(req.GroupUUID), &pipeops.UpdateProjectGroupRequest{
+		Name:                   req.Name,
+		DefaultClusterUUID:     req.DefaultClusterUUID,
+		DefaultEnvironmentUUID: req.DefaultEnvironmentUUID,
+	}, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) deleteProjectGroupTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	groupUUID, err := requiredString(args, "group_uuid")
+	if err != nil {
+		return nil, err
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := s.client.ProjectGroups.Delete(ctx, groupUUID, opts); err != nil {
+		return nil, err
+	}
+	return textResult("Project group deleted successfully"), nil
+}
+
+func (s *Server) attachProjectGroupMemberTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req attachProjectGroupMemberArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GroupUUID) == "" {
+		return nil, fmt.Errorf("group_uuid is required")
+	}
+	if strings.TrimSpace(req.MemberType) == "" {
+		return nil, fmt.Errorf("member_type is required")
+	}
+	if strings.TrimSpace(req.MemberUUID) == "" {
+		return nil, fmt.Errorf("member_uuid is required")
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.AttachMember(ctx, strings.TrimSpace(req.GroupUUID), &pipeops.AttachProjectGroupMemberRequest{
+		MemberType:     strings.TrimSpace(req.MemberType),
+		MemberUUID:     strings.TrimSpace(req.MemberUUID),
+		IncludeSession: req.IncludeSession,
+		Move:           req.Move,
+	}, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) detachProjectGroupMemberTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req detachProjectGroupMemberArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GroupUUID) == "" {
+		return nil, fmt.Errorf("group_uuid is required")
+	}
+	if strings.TrimSpace(req.MemberType) == "" {
+		return nil, fmt.Errorf("member_type is required")
+	}
+	if strings.TrimSpace(req.MemberUUID) == "" {
+		return nil, fmt.Errorf("member_uuid is required")
+	}
+
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := s.client.ProjectGroups.DetachMember(ctx, strings.TrimSpace(req.GroupUUID), strings.TrimSpace(req.MemberType), strings.TrimSpace(req.MemberUUID), &pipeops.ProjectGroupDetachOptions{
+		WorkspaceUUID:  workspaceUUID,
+		IncludeSession: req.IncludeSession,
+	}); err != nil {
+		return nil, err
+	}
+	return textResult("Project group member detached successfully"), nil
+}
+
+func (s *Server) getProjectGroupTopologyTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	groupUUID, err := requiredString(args, "group_uuid")
+	if err != nil {
+		return nil, err
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.GetTopology(ctx, groupUUID, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getProjectGroupSharedEnvTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	groupUUID, err := requiredString(args, "group_uuid")
+	if err != nil {
+		return nil, err
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.GetSharedEnv(ctx, groupUUID, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) putProjectGroupSharedEnvTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req putProjectGroupSharedEnvArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GroupUUID) == "" {
+		return nil, fmt.Errorf("group_uuid is required")
+	}
+	if req.Variables == nil {
+		return nil, fmt.Errorf("variables is required")
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.PutSharedEnv(ctx, strings.TrimSpace(req.GroupUUID), &pipeops.UpsertProjectGroupSharedEnvRequest{
+		Variables:      req.Variables,
+		Inject:         req.Inject,
+		Overwrite:      req.Overwrite,
+		Redeploy:       req.Redeploy,
+		KeepReferences: req.KeepReferences,
+	}, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) injectProjectGroupSharedEnvTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req injectProjectGroupSharedEnvArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GroupUUID) == "" {
+		return nil, fmt.Errorf("group_uuid is required")
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.InjectSharedEnv(ctx, strings.TrimSpace(req.GroupUUID), &pipeops.InjectProjectGroupSharedEnvRequest{
+		Overwrite:      req.Overwrite,
+		Redeploy:       req.Redeploy,
+		MemberUUIDs:    req.MemberUUIDs,
+		KeepReferences: req.KeepReferences,
+	}, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) connectProjectGroupServicesTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req connectProjectGroupServicesArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.GroupUUID) == "" {
+		return nil, fmt.Errorf("group_uuid is required")
+	}
+	if strings.TrimSpace(req.ConsumerType) == "" {
+		return nil, fmt.Errorf("consumer_type is required")
+	}
+	if strings.TrimSpace(req.ConsumerUUID) == "" {
+		return nil, fmt.Errorf("consumer_uuid is required")
+	}
+	if strings.TrimSpace(req.ProviderType) == "" {
+		return nil, fmt.Errorf("provider_type is required")
+	}
+	if strings.TrimSpace(req.ProviderUUID) == "" {
+		return nil, fmt.Errorf("provider_uuid is required")
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.ConnectServices(ctx, strings.TrimSpace(req.GroupUUID), &pipeops.ConnectProjectGroupServicesRequest{
+		ConsumerType: strings.TrimSpace(req.ConsumerType),
+		ConsumerUUID: strings.TrimSpace(req.ConsumerUUID),
+		ProviderType: strings.TrimSpace(req.ProviderType),
+		ProviderUUID: strings.TrimSpace(req.ProviderUUID),
+		Overwrite:    req.Overwrite,
+		VariableSet:  strings.TrimSpace(req.VariableSet),
+	}, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) redeployProjectGroupAppsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	groupUUID, err := requiredString(args, "group_uuid")
+	if err != nil {
+		return nil, err
+	}
+
+	opts, err := s.projectGroupWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.RedeployApps(ctx, groupUUID, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) resolveProjectGroupMemberTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req resolveProjectGroupMemberArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.MemberType) == "" {
+		return nil, fmt.Errorf("member_type is required")
+	}
+	if strings.TrimSpace(req.MemberUUID) == "" {
+		return nil, fmt.Errorf("member_uuid is required")
+	}
+
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.ResolveMember(ctx, &pipeops.ProjectGroupResolveOptions{
+		WorkspaceUUID: workspaceUUID,
+		MemberType:    strings.TrimSpace(req.MemberType),
+		MemberUUID:    strings.TrimSpace(req.MemberUUID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) listProjectGroupCandidatesTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req listProjectGroupCandidatesArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ProjectGroups.ListCandidates(ctx, &pipeops.ProjectGroupCandidatesOptions{
+		WorkspaceUUID: workspaceUUID,
+		GroupUUID:     strings.TrimSpace(req.GroupUUID),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
 }
