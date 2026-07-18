@@ -94,20 +94,28 @@ func (s *Server) toolDefinitions() []toolDefinition {
 					"port":             integerProperty("Optional application port (maps to networkSettings)"),
 					"protocol":         stringProperty("Optional network protocol for port (default: HTTP)"),
 					"env_vars":         objectProperty("Optional environment variables as key→value map (maps to envVariables[])", true),
-					"build_settings": objectProperty("Optional nested buildSettings object (build_method, build_command, run_command, worker, type, …)", map[string]interface{}{
-						"type":             map[string]interface{}{"type": "string"},
-						"build_method":     map[string]interface{}{"type": "string"},
-						"buildMethod":      map[string]interface{}{"type": "string"},
-						"build_command":    map[string]interface{}{"type": "string"},
-						"buildCommand":     map[string]interface{}{"type": "string"},
-						"run_command":      map[string]interface{}{"type": "string"},
-						"runCommand":       map[string]interface{}{"type": "string"},
-						"worker":           map[string]interface{}{"type": "boolean"},
-						"build_path":       map[string]interface{}{"type": "string"},
-						"build_directory":  map[string]interface{}{"type": "string"},
-						"docker_image_url": map[string]interface{}{"type": "string"},
-						"dockerImageURL":   map[string]interface{}{"type": "string"},
-					}),
+					// Nested object MUST use properties (not additionalProperties). Passing a
+					// property map as additionalProperties breaks JSON Schema draft 2020-12
+					// (Claude rejects it): the nested key "type" collides with the schema keyword.
+					"build_settings": nestedObjectProperty(
+						"Optional nested buildSettings object (build_method, build_command, run_command, worker, type, …)",
+						map[string]interface{}{
+							"type":             stringProperty("Build settings type (e.g. user)"),
+							"build_method":     stringProperty("Build method (e.g. nodejs, docker)"),
+							"buildMethod":      stringProperty("Alias for build_method"),
+							"build_command":    stringProperty("Build command"),
+							"buildCommand":     stringProperty("Alias for build_command"),
+							"run_command":      stringProperty("Run/start command"),
+							"runCommand":       stringProperty("Alias for run_command"),
+							"worker":           booleanProperty("Whether this is a worker project"),
+							"build_path":       stringProperty("Build path"),
+							"build_directory":  stringProperty("Build directory"),
+							"build_version":    stringProperty("Build version / runtime image tag"),
+							"docker_path":      stringProperty("Dockerfile path"),
+							"docker_image_url": stringProperty("Prebuilt docker image URL"),
+							"dockerImageURL":   stringProperty("Alias for docker_image_url"),
+						},
+					),
 				}, "name", "cluster_uuid", "environment_uuid", "repository", "branch", "source", "username"),
 			},
 			handler: s.createProjectTool,
@@ -1211,9 +1219,20 @@ func objectProperty(description string, additionalProperties interface{}) map[st
 		"description": description,
 	}
 	if additionalProperties != nil {
+		// additionalProperties must be a boolean or a valid schema. Callers that
+		// need named fields should use nestedObjectProperty instead of passing a
+		// properties map here (that pattern breaks draft 2020-12 for Claude).
 		property["additionalProperties"] = additionalProperties
 	}
 	return property
+}
+
+// nestedObjectProperty builds a typed object schema with fixed properties.
+// Use this for nested tool arguments; do not pass property maps to objectProperty.
+func nestedObjectProperty(description string, properties map[string]interface{}, required ...string) map[string]interface{} {
+	schema := objectSchema(properties, required...)
+	schema["description"] = description
+	return schema
 }
 
 func envVariablesProperty(description string) map[string]interface{} {
