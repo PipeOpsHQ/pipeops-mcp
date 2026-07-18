@@ -495,9 +495,14 @@ func (b *oauthBridge) completeAuthorization(w http.ResponseWriter, r *http.Reque
 }
 
 func (b *oauthBridge) renderConsentPage(w http.ResponseWriter, authorization oauthAuthorizationRequest, errorMessage string) {
+	scriptNonce, err := randomOAuthValue("", 18)
+	if err != nil {
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-"+scriptNonce+"'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
 	data := struct {
 		RequestID    string
@@ -505,12 +510,14 @@ func (b *oauthBridge) renderConsentPage(w http.ResponseWriter, authorization oau
 		RedirectHost string
 		Scopes       []string
 		ErrorMessage string
+		ScriptNonce  string
 	}{
 		RequestID:    authorization.ID,
 		ClientName:   authorization.ClientName,
 		RedirectHost: authorizationRedirectHost(authorization.RedirectURI),
 		Scopes:       authorization.Scopes,
 		ErrorMessage: errorMessage,
+		ScriptNonce:  scriptNonce,
 	}
 	if err := b.consentPage.Execute(w, data); err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
@@ -1131,8 +1138,10 @@ const oauthConsentPage = `<!doctype html>
     p, li { color: #b9c9dc; line-height: 1.55; }
     label { display: block; margin: 1.25rem 0 .5rem; font-weight: 650; }
     input { width: 100%; box-sizing: border-box; padding: .85rem; border: 1px solid #3a506d; border-radius: .6rem; background: #07111f; color: #fff; }
+    input[aria-invalid="true"] { border-color: #ff7b8b; outline-color: #ff7b8b; }
     .actions { display: flex; gap: .75rem; margin-top: 1.25rem; }
     button { border: 0; border-radius: .6rem; padding: .8rem 1rem; font-weight: 700; cursor: pointer; }
+    button:disabled { cursor: wait; opacity: .7; }
     button[value="approve"] { background: #5b8cff; color: #06101d; }
     button[value="deny"] { background: #24364d; color: #eaf2ff; }
     .error { padding: .75rem; border-radius: .5rem; background: #4a1720; color: #ffd9df; }
@@ -1150,13 +1159,56 @@ const oauthConsentPage = `<!doctype html>
   <form method="post" action="/oauth/authorize">
     <input type="hidden" name="request_id" value="{{.RequestID}}">
     <label for="service_token">Workspace service token</label>
-    <input id="service_token" name="service_token" type="password" autocomplete="off" spellcheck="false" required>
-    <p>Create a dedicated token under <a href="https://console.pipeops.io/dashboard/integrations?cloudIntegrations=tokens" target="_blank" rel="noopener noreferrer">PipeOps Service Tokens</a>. Use <code>api:read</code> first and add <code>api:write</code> only when needed.</p>
+    <input id="service_token" name="service_token" type="password" autocomplete="off" spellcheck="false" aria-describedby="service_token_help form_error" required autofocus>
+    <p id="service_token_help">Create a dedicated token under <a href="https://console.pipeops.io/dashboard/integrations?cloudIntegrations=tokens" target="_blank" rel="noopener noreferrer">PipeOps Service Tokens</a>. Use <code>api:read</code> first and add <code>api:write</code> only when needed.</p>
+    <p id="form_error" class="error" role="alert" aria-live="assertive" hidden></p>
     <div class="actions">
       <button type="submit" name="action" value="approve">Connect</button>
       <button type="submit" name="action" value="deny" formnovalidate>Cancel</button>
     </div>
   </form>
 </main>
+<script nonce="{{.ScriptNonce}}">
+  (() => {
+    const form = document.querySelector("form");
+    const token = document.getElementById("service_token");
+    const error = document.getElementById("form_error");
+    const connect = form.querySelector('button[value="approve"]');
+
+    const showError = (message) => {
+      error.textContent = message;
+      error.hidden = false;
+      token.setAttribute("aria-invalid", "true");
+      token.focus();
+    };
+    const clearError = () => {
+      error.textContent = "";
+      error.hidden = true;
+      token.removeAttribute("aria-invalid");
+    };
+
+    form.addEventListener("invalid", (event) => {
+      if (event.target === token) {
+        event.preventDefault();
+        showError("Paste a PipeOps workspace service token before connecting.");
+      }
+    }, true);
+    token.addEventListener("input", clearError);
+    form.addEventListener("submit", (event) => {
+      if (event.submitter?.value === "deny") return;
+      const value = token.value.trim();
+      if (!value.startsWith("sat_") || /\s/.test(value)) {
+        event.preventDefault();
+        showError("Enter a valid PipeOps workspace service token beginning with sat_.");
+        return;
+      }
+      token.value = value;
+      clearError();
+      form.setAttribute("aria-busy", "true");
+      connect.disabled = true;
+      connect.textContent = "Connecting…";
+    });
+  })();
+</script>
 </body>
 </html>`
