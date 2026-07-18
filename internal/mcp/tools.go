@@ -70,29 +70,30 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				Name:        "create_project",
 				Description: "Create a new project via POST /project/create (clusterUUID + environment_uuid contract)",
 				InputSchema: objectSchema(map[string]interface{}{
-					"name":              stringProperty("The project name"),
-					"username":          stringProperty("VCS username/org that owns the repository (e.g. github org or user)"),
-					"source":            stringProperty("Source provider: github | gitlab | bitbucket | image (default: github)"),
-					"repository":        stringProperty("Repository URL for the project source"),
-					"branch":            stringProperty("Repository branch to deploy"),
-					"cluster_uuid":      stringProperty("Cluster UUID that will host the project (preferred; maps to clusterUUID)"),
-					"clusterUUID":       stringProperty("Alias for cluster_uuid (controller JSON key)"),
-					"server_id":         stringProperty("Legacy alias for cluster_uuid (soft migration)"),
-					"environment_uuid":  stringProperty("Environment UUID for the project"),
-					"environment_id":    stringProperty("Legacy alias for environment_uuid (soft migration)"),
-					"environment":       stringProperty("Environment name/slug (default: development)"),
-					"workspace_id":      stringProperty("Optional workspace UUID/ID override (maps to workspace_uuid)"),
-					"commit_url":        stringProperty("Optional commit URL"),
-					"commit_sha":        stringProperty("Optional commit SHA"),
-					"language":          stringProperty("Optional repository language (maps to repositoryLanguage)"),
-					"framework":         stringProperty("Optional framework name"),
-					"build_method":      stringProperty("Optional build method (e.g. nodejs, docker, go)"),
-					"build_command":     stringProperty("Optional build command"),
-					"run_command":       stringProperty("Optional run/start command"),
-					"start_command":     stringProperty("Legacy alias for run_command"),
-					"port":              integerProperty("Optional application port (maps to networkSettings)"),
-					"protocol":          stringProperty("Optional network protocol for port (default: HTTP)"),
-					"env_vars":          objectProperty("Optional environment variables as key→value map (maps to envVariables[])", true),
+					"name":             stringProperty("The project name"),
+					"username":         stringProperty("VCS username/org that owns the repository (e.g. github org or user)"),
+					"source":           stringProperty("Source provider: github | gitlab | bitbucket | image (default: github)"),
+					"repository":       stringProperty("Repository URL for the project source"),
+					"branch":           stringProperty("Repository branch to deploy"),
+					"cluster_uuid":     stringProperty("Cluster UUID that will host the project (preferred; maps to clusterUUID)"),
+					"clusterUUID":      stringProperty("Alias for cluster_uuid (controller JSON key)"),
+					"server_id":        stringProperty("Legacy alias for cluster_uuid (soft migration)"),
+					"environment_uuid": stringProperty("Environment UUID for the project"),
+					"environment_id":   stringProperty("Legacy alias for environment_uuid (soft migration)"),
+					"environment":      stringProperty("Environment name/slug (default: development)"),
+					"workspace_id":     stringProperty("Workspace UUID/ID (maps to workspace_uuid; defaults to first workspace if omitted)"),
+					"workspace_uuid":   stringProperty("Alias for workspace_id (controller JSON key)"),
+					"commit_url":       stringProperty("Optional commit URL"),
+					"commit_sha":       stringProperty("Optional commit SHA"),
+					"language":         stringProperty("Optional repository language (maps to repositoryLanguage)"),
+					"framework":        stringProperty("Optional framework name"),
+					"build_method":     stringProperty("Optional build method (e.g. nodejs, docker, go)"),
+					"build_command":    stringProperty("Optional build command"),
+					"run_command":      stringProperty("Optional run/start command"),
+					"start_command":    stringProperty("Legacy alias for run_command"),
+					"port":             integerProperty("Optional application port (maps to networkSettings)"),
+					"protocol":         stringProperty("Optional network protocol for port (default: HTTP)"),
+					"env_vars":         objectProperty("Optional environment variables as key→value map (maps to envVariables[])", true),
 					"build_settings": objectProperty("Optional nested buildSettings object (build_method, build_command, run_command, worker, type, …)", map[string]interface{}{
 						"type":             map[string]interface{}{"type": "string"},
 						"build_method":     map[string]interface{}{"type": "string"},
@@ -1260,8 +1261,13 @@ func normalizeVCSProvider(provider string) (string, error) {
 }
 
 func (s *Server) resolveDefaultWorkspaceID(ctx context.Context, args map[string]interface{}) (string, error) {
-	if workspaceID, ok := args["workspace_id"].(string); ok && workspaceID != "" {
-		return workspaceID, nil
+	// Prefer explicit args (agents may pass either key).
+	if ws := firstNonEmptyString(
+		optionalStringArg(args, "workspace_id"),
+		optionalStringArg(args, "workspace_uuid"),
+		optionalStringArg(args, "workspaceUUID"),
+	); ws != "" {
+		return ws, nil
 	}
 
 	resp, _, err := s.client.Workspaces.List(ctx)
@@ -1289,8 +1295,12 @@ func (s *Server) resolveDefaultWorkspaceUUID(ctx context.Context, args map[strin
 		return "", err
 	}
 
-	explicitWorkspaceID, hasExplicitWorkspace := args["workspace_id"].(string)
-	if !hasExplicitWorkspace || strings.TrimSpace(explicitWorkspaceID) == "" {
+	explicitWorkspaceID := firstNonEmptyString(
+		optionalStringArg(args, "workspace_id"),
+		optionalStringArg(args, "workspace_uuid"),
+		optionalStringArg(args, "workspaceUUID"),
+	)
+	if explicitWorkspaceID == "" {
 		return workspaceID, nil
 	}
 	if isLikelyUUID(workspaceID) {
@@ -3376,12 +3386,14 @@ func (s *Server) createProjectTool(ctx context.Context, args map[string]interfac
 		environment = "development"
 	}
 
-	workspaceUUID := ""
-	if ws, resolveErr := s.resolveDefaultWorkspaceUUID(ctx, args); resolveErr == nil {
-		workspaceUUID = ws
-	} else if explicit := optionalStringArg(args, "workspace_id"); explicit != "" {
-		// Surface explicit workspace failures; otherwise SDK Create auto-fills.
-		return nil, fmt.Errorf("resolve workspace: %w", resolveErr)
+	// workspace_uuid is required by POST /project/create — never omit.
+	// Resolve from workspace_id / workspace_uuid args, else first workspace.
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w", err)
+	}
+	if strings.TrimSpace(workspaceUUID) == "" {
+		return nil, fmt.Errorf("workspace_uuid is required")
 	}
 
 	buildMethod := optionalStringArg(args, "build_method")

@@ -388,7 +388,7 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		t.Fatal("Expected create_project properties schema")
 	}
 	for _, field := range []string{
-		"cluster_uuid", "server_id", "environment_uuid", "workspace_id",
+		"cluster_uuid", "server_id", "environment_uuid", "workspace_id", "workspace_uuid",
 		"build_method", "build_command", "run_command", "port", "env_vars", "build_settings",
 	} {
 		if _, ok := createProjectProperties[field]; !ok {
@@ -1515,6 +1515,120 @@ func TestDeployProjectFromImageToolResolvesWorkspaceUUIDFromID(t *testing.T) {
 	}
 	if workspaceLookups != 1 {
 		t.Fatalf("workspace lookups = %d, want 1", workspaceLookups)
+	}
+}
+
+func TestCreateProjectToolAlwaysSendsWorkspaceUUID(t *testing.T) {
+	t.Parallel()
+
+	const wantWorkspace = "ws-create-1"
+
+	client, err := pipeops.NewClient("https://api.pipeops.test", pipeops.WithMaxRetries(0))
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch r.URL.Path {
+			case "/workspace":
+				// Should not be needed when workspace_uuid is explicit, but allow list fallback.
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"UUID":"`+wantWorkspace+`","uuid":"`+wantWorkspace+`"}]}`), nil
+			case "/project/create":
+				body, readErr := io.ReadAll(r.Body)
+				if readErr != nil {
+					t.Fatalf("ReadAll body error: %v", readErr)
+				}
+				var payload map[string]interface{}
+				if err := json.Unmarshal(body, &payload); err != nil {
+					t.Fatalf("unmarshal body error: %v", err)
+				}
+				if got := payload["workspace_uuid"]; got != wantWorkspace {
+					t.Fatalf("workspace_uuid = %#v, want %q (full body: %s)", got, wantWorkspace, string(body))
+				}
+				if _, ok := payload["clusterUUID"]; !ok {
+					t.Fatalf("missing clusterUUID in body: %s", string(body))
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","message":"ok","data":{"project":{"UUID":"p-new","Name":"hello"}}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	// Explicit workspace_uuid (controller key) must land in the POST body.
+	result, err := server.createProjectTool(context.Background(), map[string]interface{}{
+		"name":             "hello",
+		"username":         "9trocode",
+		"source":           "github",
+		"repository":       "https://github.com/9trocode/pipeops-hello-app",
+		"branch":           "main",
+		"cluster_uuid":     "cluster-1",
+		"environment_uuid": "env-1",
+		"environment":      "development",
+		"workspace_uuid":   wantWorkspace,
+		"port":             3000,
+		"build_method":     "docker",
+		"run_command":      "node server.js",
+	})
+	if err != nil {
+		t.Fatalf("createProjectTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+
+	// Default workspace from list when no workspace arg is provided.
+	result, err = server.createProjectTool(context.Background(), map[string]interface{}{
+		"name":             "hello-default-ws",
+		"username":         "9trocode",
+		"source":           "github",
+		"repository":       "https://github.com/9trocode/pipeops-hello-app",
+		"branch":           "main",
+		"cluster_uuid":     "cluster-1",
+		"environment_uuid": "env-1",
+	})
+	if err != nil {
+		t.Fatalf("createProjectTool default workspace error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result for default workspace path")
+	}
+}
+
+func TestCreateProjectToolErrorsWhenWorkspaceMissing(t *testing.T) {
+	t.Parallel()
+
+	client, err := pipeops.NewClient("https://api.pipeops.test", pipeops.WithMaxRetries(0))
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if r.URL.Path == "/workspace" {
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[]}`), nil
+			}
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+			return nil, nil
+		}),
+	})
+
+	server := &Server{client: client}
+	_, err = server.createProjectTool(context.Background(), map[string]interface{}{
+		"name":             "hello",
+		"username":         "9trocode",
+		"source":           "github",
+		"repository":       "https://github.com/9trocode/pipeops-hello-app",
+		"branch":           "main",
+		"cluster_uuid":     "cluster-1",
+		"environment_uuid": "env-1",
+	})
+	if err == nil {
+		t.Fatal("expected error when no workspace can be resolved")
+	}
+	if !strings.Contains(err.Error(), "workspace") {
+		t.Fatalf("error = %v, want workspace mention", err)
 	}
 }
 
