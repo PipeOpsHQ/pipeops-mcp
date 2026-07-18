@@ -51,12 +51,12 @@ func TestOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t *testing.T) {
 
 func testOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t *testing.T, store oauthStore) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/profile/data" || r.Header.Get("Authorization") != "Bearer sat_valid" {
+		if r.URL.Path != "/workspace" || r.Header.Get("Authorization") != "Bearer sat_valid" {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"success":true,"message":"ok","data":{"uuid":"workspace-user","email":"user@example.com"}}`)
+		_, _ = io.WriteString(w, `{"success":true,"message":"ok","data":[{"uuid":"workspace-user","name":"Test"}]}`)
 	}))
 	defer api.Close()
 
