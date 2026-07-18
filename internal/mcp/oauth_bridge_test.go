@@ -322,6 +322,177 @@ func TestOAuthBridgeRegistrationIgnoresUnknownMetadata(t *testing.T) {
 	}
 }
 
+func TestOAuthBridgeAllowsSupportedAuthorizationScopesBeyondRegistrationDefaults(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/workspace" || r.Header.Get("Authorization") != "Bearer sat_claude" {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"success":true,"message":"ok","data":[{"uuid":"claude-workspace","name":"Claude"}]}`)
+	}))
+	defer api.Close()
+
+	handler := newTestOAuthBridgeHandler(t, api.URL)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	registration := postJSON(t, server.URL+"/oauth/register", `{
+		"redirect_uris":["https://claude.ai/api/mcp/auth_callback"],
+		"token_endpoint_auth_method":"none",
+		"grant_types":["authorization_code","refresh_token"],
+		"response_types":["code"],
+		"client_name":"Claude",
+		"scope":"api:read"
+	}`)
+	if registration.StatusCode != http.StatusCreated {
+		t.Fatalf("Claude registration status = %d; body = %s", registration.StatusCode, registration.Body)
+	}
+	var registered struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := json.Unmarshal([]byte(registration.Body), &registered); err != nil || registered.ClientID == "" {
+		t.Fatalf("decode Claude registration: %v; body = %s", err, registration.Body)
+	}
+
+	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	verifier := strings.Repeat("c", 64)
+	digest := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
+	response, err := noRedirect.Get(server.URL + "/oauth/authorize?" + url.Values{
+		"client_id":             {registered.ClientID},
+		"redirect_uri":          {"https://claude.ai/api/mcp/auth_callback"},
+		"response_type":         {"code"},
+		"scope":                 {"api:read api:write"},
+		"resource":              {"https://mcp.pipeops.test/mcp"},
+		"state":                 {"claude-state"},
+		"code_challenge":        {challenge},
+		"code_challenge_method": {"S256"},
+	}.Encode())
+	if err != nil {
+		t.Fatalf("begin Claude authorization: %v", err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("Claude authorization status = %d; location = %s; body = %s", response.StatusCode, response.Header.Get("Location"), body)
+	}
+	for _, scopeItem := range []string{"<li><code>api:read</code></li>", "<li><code>api:write</code></li>"} {
+		if !strings.Contains(string(body), scopeItem) {
+			t.Fatalf("Claude authorization page does not show requested scope %q: %s", scopeItem, body)
+		}
+	}
+	requestID := regexp.MustCompile(`name="request_id" value="([^"]+)"`).FindSubmatch(body)
+	if len(requestID) != 2 {
+		t.Fatalf("Claude authorization page missing request id: %s", body)
+	}
+
+	approved, err := noRedirect.PostForm(server.URL+"/oauth/authorize", url.Values{
+		"request_id":    {string(requestID[1])},
+		"service_token": {"sat_claude"},
+		"action":        {"approve"},
+	})
+	if err != nil {
+		t.Fatalf("approve Claude authorization: %v", err)
+	}
+	_ = approved.Body.Close()
+	if approved.StatusCode != http.StatusFound {
+		t.Fatalf("Claude approval status = %d", approved.StatusCode)
+	}
+	approvalRedirect, err := url.Parse(approved.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse Claude approval redirect: %v", err)
+	}
+	code := approvalRedirect.Query().Get("code")
+	if code == "" || approvalRedirect.Query().Get("state") != "claude-state" {
+		t.Fatalf("unexpected Claude approval redirect: %s", approvalRedirect)
+	}
+
+	exchanged := postOAuthForm(t, server.URL+"/oauth/token", url.Values{
+		"grant_type":    {"authorization_code"},
+		"client_id":     {registered.ClientID},
+		"code":          {code},
+		"redirect_uri":  {"https://claude.ai/api/mcp/auth_callback"},
+		"resource":      {"https://mcp.pipeops.test/mcp"},
+		"code_verifier": {verifier},
+	})
+	if exchanged.StatusCode != http.StatusOK {
+		t.Fatalf("exchange Claude authorization code status = %d; body = %s", exchanged.StatusCode, exchanged.Body)
+	}
+	var tokens oauthTokenResponse
+	if err := json.Unmarshal([]byte(exchanged.Body), &tokens); err != nil {
+		t.Fatalf("decode Claude tokens: %v", err)
+	}
+	if tokens.Scope != "api:read api:write" {
+		t.Fatalf("Claude token scope = %q, want api:read api:write", tokens.Scope)
+	}
+
+	assertTools := func(accessToken string, wantWrite bool) {
+		t.Helper()
+		client := sdkmcp.NewClient(&sdkmcp.Implementation{Name: "claude-scope-test", Version: "1.0.0"}, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		session, err := client.Connect(ctx, &sdkmcp.StreamableClientTransport{
+			Endpoint:   server.URL + "/mcp",
+			HTTPClient: &http.Client{Transport: bearerTransport{token: accessToken, base: http.DefaultTransport}},
+			MaxRetries: -1,
+		}, nil)
+		if err != nil {
+			t.Fatalf("connect with Claude OAuth token: %v", err)
+		}
+		defer func() { _ = session.Close() }()
+		tools, err := session.ListTools(ctx, nil)
+		if err != nil {
+			t.Fatalf("list Claude OAuth tools: %v", err)
+		}
+		if toolNamed(tools.Tools, "create_project") != wantWrite {
+			t.Fatalf("create_project exposure = %t, want %t", toolNamed(tools.Tools, "create_project"), wantWrite)
+		}
+		if !toolNamed(tools.Tools, "list_projects") {
+			t.Fatal("Claude OAuth token did not expose list_projects")
+		}
+	}
+	assertTools(tokens.AccessToken, true)
+
+	refreshed := postOAuthForm(t, server.URL+"/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {registered.ClientID},
+		"refresh_token": {tokens.RefreshToken},
+		"scope":         {"api:read"},
+	})
+	if refreshed.StatusCode != http.StatusOK {
+		t.Fatalf("downscope Claude refresh status = %d; body = %s", refreshed.StatusCode, refreshed.Body)
+	}
+	var readOnlyTokens oauthTokenResponse
+	if err := json.Unmarshal([]byte(refreshed.Body), &readOnlyTokens); err != nil {
+		t.Fatalf("decode downscoped Claude tokens: %v", err)
+	}
+	if readOnlyTokens.Scope != "api:read" {
+		t.Fatalf("downscoped Claude token scope = %q, want api:read", readOnlyTokens.Scope)
+	}
+	assertTools(readOnlyTokens.AccessToken, false)
+
+	unsupported, err := noRedirect.Get(server.URL + "/oauth/authorize?" + url.Values{
+		"client_id":             {registered.ClientID},
+		"redirect_uri":          {"https://claude.ai/api/mcp/auth_callback"},
+		"response_type":         {"code"},
+		"scope":                 {"api:admin"},
+		"resource":              {"https://mcp.pipeops.test/mcp"},
+		"state":                 {"claude-state"},
+		"code_challenge":        {strings.Repeat("a", 43)},
+		"code_challenge_method": {"S256"},
+	}.Encode())
+	if err != nil {
+		t.Fatalf("request unsupported Claude scope: %v", err)
+	}
+	defer func() { _ = unsupported.Body.Close() }()
+	if unsupported.StatusCode != http.StatusFound || !strings.Contains(unsupported.Header.Get("Location"), "error=invalid_scope") {
+		t.Fatalf("unsupported Claude scope status = %d; location = %s", unsupported.StatusCode, unsupported.Header.Get("Location"))
+	}
+}
+
 func TestOAuthCredentialEncryptionBindsGrantMetadata(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 	cipher, err := newCredentialCipher(key)
@@ -396,6 +567,7 @@ func TestBearerOnlyMetadataDoesNotAdvertiseUnavailableOAuth(t *testing.T) {
 type oauthTokenResponse struct {
 	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
+	Scope        string `json:"scope"`
 }
 
 type testHTTPResponse struct {

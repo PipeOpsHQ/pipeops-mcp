@@ -386,10 +386,15 @@ func (b *oauthBridge) beginAuthorization(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	scopes, err := b.validateScopes(strings.Fields(query.Get("scope")), false)
-	if err != nil || !clientAllowsScopes(client, scopes) {
+	if err != nil {
 		b.redirectAuthorizationError(w, r, redirectURI, query.Get("state"), "invalid_scope", "unsupported scope requested")
 		return
 	}
+	// Some MCP clients use registration scope as an initial/default value, then
+	// request the complete protected-resource scope set during authorization.
+	// Open DCR is not a meaningful permission boundary because a client can
+	// immediately register again with broader scopes. Enforce the server's
+	// supported scopes here and show the exact requested set on the consent page.
 	requestID, err := randomOAuthValue("poar_", 24)
 	if err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
@@ -1087,11 +1092,6 @@ func normalizedScopes(scopes []string) []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-func clientAllowsScopes(client *oauthClientRecord, requested []string) bool {
-	registered := strings.Fields(client.Scope)
-	return len(registered) == 0 || scopeSubset(requested, registered)
 }
 
 func scopeSubset(candidate, allowed []string) bool {
