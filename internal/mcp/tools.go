@@ -895,6 +895,112 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
+				Name:        "list_addon_backups",
+				Description: "List backup snapshots for an add-on deployment",
+				InputSchema: objectSchema(map[string]interface{}{
+					"deployment_id": stringProperty("The add-on deployment ID or UUID"),
+				}, "deployment_id"),
+			},
+			handler: s.listAddonBackupsTool,
+		},
+		{
+			tool: Tool{
+				Name:        "start_addon_backup_export",
+				Description: "Start an async export of an add-on backup snapshot",
+				InputSchema: objectSchema(map[string]interface{}{
+					"deployment_id": stringProperty("The add-on deployment ID or UUID"),
+					"snapshot_id":   stringProperty("The backup snapshot ID to export"),
+					"path":          stringProperty("Optional snapshot path to export"),
+					"format":        stringProperty("Optional export format: auto, sql, rdb, or archive"),
+				}, "deployment_id", "snapshot_id"),
+			},
+			handler: s.startAddonBackupExportTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_addon_backup_export",
+				Description: "Get status for an add-on backup export job",
+				InputSchema: objectSchema(map[string]interface{}{
+					"deployment_id": stringProperty("The add-on deployment ID or UUID"),
+					"export_id":     stringProperty("The backup export job ID"),
+				}, "deployment_id", "export_id"),
+			},
+			handler: s.getAddonBackupExportTool,
+		},
+		{
+			tool: Tool{
+				Name:        "list_volumes",
+				Description: "List workspace volumes with optional status and cluster filters",
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
+					"status":       stringProperty("Optional volume status filter (e.g. mounted, unattached)"),
+					"cluster_uuid": stringProperty("Optional cluster/server UUID filter"),
+					"limit":        integerProperty("Optional page size"),
+					"offset":       integerProperty("Optional page offset"),
+				}),
+			},
+			handler: s.listVolumesTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_volume",
+				Description: "Get detailed information about a workspace volume",
+				InputSchema: objectSchema(map[string]interface{}{
+					"volume_uuid":  stringProperty("The volume UUID"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "volume_uuid"),
+			},
+			handler: s.getVolumeTool,
+		},
+		{
+			tool: Tool{
+				Name:        "remount_volume",
+				Description: "Remount an unattached volume onto a project or add-on",
+				InputSchema: objectSchema(map[string]interface{}{
+					"volume_uuid":  stringProperty("The volume UUID to remount"),
+					"target_type":  stringProperty("Remount target type: project or addon"),
+					"target_uuid":  stringProperty("The project or add-on UUID to mount onto"),
+					"mount_path":   stringProperty("Optional mount path inside the target"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "volume_uuid", "target_type", "target_uuid"),
+			},
+			handler: s.remountVolumeTool,
+		},
+		{
+			tool: Tool{
+				Name:        "delete_volume",
+				Description: "Permanently delete a workspace volume",
+				InputSchema: objectSchema(map[string]interface{}{
+					"volume_uuid":  stringProperty("The volume UUID to delete"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "volume_uuid"),
+			},
+			handler: s.deleteVolumeTool,
+		},
+		{
+			tool: Tool{
+				Name:        "export_volume",
+				Description: "Start an async export of a workspace volume",
+				InputSchema: objectSchema(map[string]interface{}{
+					"volume_uuid":  stringProperty("The volume UUID to export"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "volume_uuid"),
+			},
+			handler: s.exportVolumeTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_volume_export",
+				Description: "Get status for a workspace volume export job",
+				InputSchema: objectSchema(map[string]interface{}{
+					"volume_uuid":  stringProperty("The volume UUID whose export status to fetch"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "volume_uuid"),
+			},
+			handler: s.getVolumeExportTool,
+		},
+		{
+			tool: Tool{
 				Name:        "get_billing_info",
 				Description: "Get current billing balance and subscription information for the account",
 				InputSchema: objectSchema(map[string]interface{}{
@@ -1982,6 +2088,43 @@ type listAddOnsArgs struct {
 	Search      string `json:"search,omitempty"`
 	Featured    *bool  `json:"featured,omitempty"`
 	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type listVolumesArgs struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Status      string `json:"status,omitempty"`
+	ClusterUUID string `json:"cluster_uuid,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+	Offset      int    `json:"offset,omitempty"`
+}
+
+type volumeUUIDArgs struct {
+	VolumeUUID  string `json:"volume_uuid"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type remountVolumeArgs struct {
+	VolumeUUID  string `json:"volume_uuid"`
+	TargetType  string `json:"target_type"`
+	TargetUUID  string `json:"target_uuid"`
+	MountPath   string `json:"mount_path,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type listAddonBackupsArgs struct {
+	DeploymentID string `json:"deployment_id"`
+}
+
+type startAddonBackupExportArgs struct {
+	DeploymentID string `json:"deployment_id"`
+	SnapshotID   string `json:"snapshot_id"`
+	Path         string `json:"path,omitempty"`
+	Format       string `json:"format,omitempty"`
+}
+
+type getAddonBackupExportArgs struct {
+	DeploymentID string `json:"deployment_id"`
+	ExportID     string `json:"export_id"`
 }
 
 type vcsProviderArgs struct {
@@ -5302,6 +5445,219 @@ func (s *Server) listAddOnCategoriesTool(ctx context.Context, _ map[string]inter
 		return nil, err
 	}
 	return jsonResult(normalizeCollectionResponse(resp, "categories"))
+}
+
+func (s *Server) volumeListOptions(ctx context.Context, args map[string]interface{}, status, clusterUUID string, limit, offset int) (*pipeops.VolumeListOptions, error) {
+	opts := &pipeops.VolumeListOptions{
+		Status:      strings.TrimSpace(status),
+		ClusterUUID: strings.TrimSpace(clusterUUID),
+		Limit:       limit,
+		Offset:      offset,
+	}
+	if workspaceID, ok := args["workspace_id"].(string); ok && strings.TrimSpace(workspaceID) != "" {
+		workspaceUUID, err := s.resolveWorkspaceUUID(ctx, workspaceID)
+		if err != nil {
+			return nil, err
+		}
+		opts.WorkspaceUUID = workspaceUUID
+	} else {
+		workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+		if err != nil {
+			return nil, err
+		}
+		opts.WorkspaceUUID = workspaceUUID
+	}
+	return opts, nil
+}
+
+func (s *Server) listVolumesTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req listVolumesArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+
+	opts, err := s.volumeListOptions(ctx, args, req.Status, req.ClusterUUID, req.Limit, req.Offset)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.Volumes.List(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getVolumeTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req volumeUUIDArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.VolumeUUID) == "" {
+		return nil, fmt.Errorf("volume_uuid is required")
+	}
+
+	opts, err := s.volumeListOptions(ctx, args, "", "", 0, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.Volumes.Get(ctx, req.VolumeUUID, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) remountVolumeTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req remountVolumeArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.VolumeUUID) == "" {
+		return nil, fmt.Errorf("volume_uuid is required")
+	}
+	if strings.TrimSpace(req.TargetType) == "" {
+		return nil, fmt.Errorf("target_type is required")
+	}
+	if strings.TrimSpace(req.TargetUUID) == "" {
+		return nil, fmt.Errorf("target_uuid is required")
+	}
+
+	opts, err := s.volumeListOptions(ctx, args, "", "", 0, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.Volumes.Remount(ctx, req.VolumeUUID, &pipeops.RemountVolumeRequest{
+		TargetType: strings.TrimSpace(req.TargetType),
+		TargetUUID: strings.TrimSpace(req.TargetUUID),
+		MountPath:  strings.TrimSpace(req.MountPath),
+	}, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) deleteVolumeTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req volumeUUIDArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.VolumeUUID) == "" {
+		return nil, fmt.Errorf("volume_uuid is required")
+	}
+
+	opts, err := s.volumeListOptions(ctx, args, "", "", 0, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	if _, err := s.client.Volumes.Delete(ctx, req.VolumeUUID, opts); err != nil {
+		return nil, err
+	}
+	return textResult("Volume deleted successfully"), nil
+}
+
+func (s *Server) exportVolumeTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req volumeUUIDArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.VolumeUUID) == "" {
+		return nil, fmt.Errorf("volume_uuid is required")
+	}
+
+	opts, err := s.volumeListOptions(ctx, args, "", "", 0, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.Volumes.StartExport(ctx, req.VolumeUUID, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getVolumeExportTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req volumeUUIDArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.VolumeUUID) == "" {
+		return nil, fmt.Errorf("volume_uuid is required")
+	}
+
+	opts, err := s.volumeListOptions(ctx, args, "", "", 0, 0)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.Volumes.GetExport(ctx, req.VolumeUUID, opts)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) listAddonBackupsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req listAddonBackupsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.DeploymentID) == "" {
+		return nil, fmt.Errorf("deployment_id is required")
+	}
+
+	resp, _, err := s.client.AddOns.ListAddonBackups(ctx, req.DeploymentID)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) startAddonBackupExportTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req startAddonBackupExportArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.DeploymentID) == "" {
+		return nil, fmt.Errorf("deployment_id is required")
+	}
+	if strings.TrimSpace(req.SnapshotID) == "" {
+		return nil, fmt.Errorf("snapshot_id is required")
+	}
+
+	resp, _, err := s.client.AddOns.StartAddonBackupExport(ctx, req.DeploymentID, &pipeops.AddonBackupExportRequest{
+		SnapshotID: strings.TrimSpace(req.SnapshotID),
+		Path:       strings.TrimSpace(req.Path),
+		Format:     strings.TrimSpace(req.Format),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getAddonBackupExportTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req getAddonBackupExportArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.DeploymentID) == "" {
+		return nil, fmt.Errorf("deployment_id is required")
+	}
+	if strings.TrimSpace(req.ExportID) == "" {
+		return nil, fmt.Errorf("export_id is required")
+	}
+
+	resp, _, err := s.client.AddOns.GetAddonBackupExport(ctx, req.DeploymentID, req.ExportID)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
 }
 
 func (s *Server) getMyAddOnSubmissionsTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
