@@ -88,6 +88,24 @@ func testOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t *testing.T, store oau
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("authorize status = %d; body = %s", response.StatusCode, page)
 	}
+	for _, expected := range []string{
+		`id="form_error"`,
+		`Paste a PipeOps workspace service token before connecting.`,
+		`Enter a valid PipeOps workspace service token beginning with sat_.`,
+		`connect.textContent = "Connecting…"`,
+	} {
+		if !strings.Contains(string(page), expected) {
+			t.Fatalf("authorization page missing visible submit feedback %q: %s", expected, page)
+		}
+	}
+	nonceMatch := regexp.MustCompile(`<script nonce="([^"]+)">`).FindSubmatch(page)
+	if len(nonceMatch) != 2 {
+		t.Fatalf("authorization page missing script nonce: %s", page)
+	}
+	csp := response.Header.Get("Content-Security-Policy")
+	if !strings.Contains(csp, "script-src 'nonce-"+string(nonceMatch[1])+"'") {
+		t.Fatalf("authorization page CSP does not allow its nonce: %q", csp)
+	}
 	match := regexp.MustCompile(`name="request_id" value="([^"]+)"`).FindSubmatch(page)
 	if len(match) != 2 {
 		t.Fatalf("authorization page missing request id: %s", page)
