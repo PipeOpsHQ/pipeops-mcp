@@ -18,12 +18,14 @@ import (
 )
 
 const (
-	defaultBaseURL     = "https://api.pipeops.io"
-	defaultResourceURL = "https://mcp.pipeops.app/mcp"
-	defaultHTTPAddr    = ":8080"
-	defaultMaxBodySize = int64(4 << 20)
-	defaultOAuthStore  = "sqlite"
-	defaultSQLitePath  = "/data/oauth/pipeops-mcp-oauth.db"
+	defaultBaseURL         = "https://api.pipeops.io"
+	defaultResourceURL     = "https://mcp.pipeops.app/mcp"
+	defaultHTTPAddr        = ":8080"
+	defaultMaxBodySize     = int64(4 << 20)
+	defaultOAuthStore      = "sqlite"
+	defaultSQLitePath      = "/data/oauth/pipeops-mcp-oauth.db"
+	defaultConsoleURL      = "https://console.pipeops.io"
+	defaultConsoleClientID = "pipeops_public_client"
 )
 
 type verifiedCredentialContextKey struct{}
@@ -58,6 +60,9 @@ type HTTPConfig struct {
 	OAuthSQLitePath     string
 	OAuthRedisURL       string
 	OAuthEncryptionKey  string
+	ConsoleURL          string
+	ConsoleClientID     string
+	ConsoleScopes       []string
 	Scopes              []string
 	MaxBodyBytes        int64
 	oauthStore          oauthStore
@@ -75,6 +80,9 @@ func LoadHTTPConfigFromEnv() HTTPConfig {
 		OAuthSQLitePath:     strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_SQLITE_PATH")),
 		OAuthRedisURL:       strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_REDIS_URL")),
 		OAuthEncryptionKey:  strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_ENCRYPTION_KEY")),
+		ConsoleURL:          strings.TrimSpace(os.Getenv("PIPEOPS_CONSOLE_OAUTH_URL")),
+		ConsoleClientID:     strings.TrimSpace(os.Getenv("PIPEOPS_CONSOLE_OAUTH_CLIENT_ID")),
+		ConsoleScopes:       splitList(os.Getenv("PIPEOPS_CONSOLE_OAUTH_SCOPES")),
 		Scopes:              splitList(os.Getenv("PIPEOPS_MCP_SCOPES")),
 		MaxBodyBytes:        defaultMaxBodySize,
 	}
@@ -153,12 +161,15 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 			ownedStore, _ = store.(interface{ Close() error })
 		}
 		bridge, err = newOAuthBridge(oauthBridgeConfig{
-			Issuer:      issuer,
-			ResourceURL: config.ResourceURL,
-			BaseURL:     config.BaseURL,
-			Scopes:      config.Scopes,
-			Store:       store,
-			Cipher:      credentialCipher,
+			Issuer:          issuer,
+			ResourceURL:     config.ResourceURL,
+			BaseURL:         config.BaseURL,
+			ConsoleURL:      config.ConsoleURL,
+			ConsoleClientID: config.ConsoleClientID,
+			ConsoleScopes:   config.ConsoleScopes,
+			Scopes:          config.Scopes,
+			Store:           store,
+			Cipher:          credentialCipher,
 		})
 		if err != nil {
 			if ownedStore != nil {
@@ -239,6 +250,15 @@ func withHTTPDefaults(config HTTPConfig) HTTPConfig {
 	}
 	if config.OAuthSQLitePath == "" {
 		config.OAuthSQLitePath = defaultSQLitePath
+	}
+	if config.ConsoleURL == "" {
+		config.ConsoleURL = defaultConsoleURL
+	}
+	if config.ConsoleClientID == "" {
+		config.ConsoleClientID = defaultConsoleClientID
+	}
+	if len(config.ConsoleScopes) == 0 {
+		config.ConsoleScopes = []string{"openid", "profile", "email"}
 	}
 	if config.MaxBodyBytes <= 0 {
 		config.MaxBodyBytes = defaultMaxBodySize

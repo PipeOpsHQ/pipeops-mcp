@@ -26,9 +26,10 @@ https://mcp.pipeops.app/mcp
 
 When the hosted service runs with `PIPEOPS_OAUTH_MODE=bridge`, OAuth-capable
 clients discover the authorization server automatically. The PipeOps consent
-page asks for a dedicated workspace service token and returns short-lived,
-scoped OAuth credentials to the MCP client. The raw PipeOps token is encrypted
-at rest and is never returned to the client.
+flow opens the PipeOps Console, where the customer signs in with the same PKCE
+OAuth flow as `pipeops login`. The bridge returns short-lived, scoped OAuth
+credentials to the MCP client. The Console access and refresh credentials are
+encrypted at rest and are never returned to the client.
 
 Clients that support static request headers can continue to connect directly:
 
@@ -81,6 +82,9 @@ Hosted transport configuration:
 - `PIPEOPS_OAUTH_ENCRYPTION_KEY` is required in `bridge` mode and must be a base64-encoded 32-byte key
 - `PIPEOPS_OAUTH_ISSUER` optionally overrides the bridge issuer and is required in `external` mode
 - `PIPEOPS_MCP_SCOPES` optionally overrides the comma-separated scopes (defaults to `api:read,api:write`)
+- `PIPEOPS_CONSOLE_OAUTH_URL` optionally overrides the Console URL (defaults to `https://console.pipeops.io`)
+- `PIPEOPS_CONSOLE_OAUTH_CLIENT_ID` optionally overrides the Console public OAuth client (defaults to `pipeops_public_client`)
+- `PIPEOPS_CONSOLE_OAUTH_SCOPES` optionally overrides the Console scopes (defaults to `openid,profile,email`)
 
 Generate the bridge encryption key with `openssl rand -base64 32`. Mount a
 persistent volume at `/data` when using SQLite so OAuth connections survive
@@ -88,7 +92,7 @@ container replacement. Use Redis only when multiple MCP replicas need shared
 state. The mounted directory must be writable by UID/GID `65532`; the server
 keeps `/data/oauth` private with mode `0700` and its database files at mode
 `0600`. Do not set a shared `PIPEOPS_TOKEN` on the hosted service; each customer
-authorizes their own workspace credential.
+authorizes their own PipeOps Console session.
 
 ## Usage
 

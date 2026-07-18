@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -9,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"net"
 	"net/http"
@@ -36,26 +36,31 @@ var (
 )
 
 type oauthBridgeConfig struct {
-	Issuer      string
-	ResourceURL string
-	BaseURL     string
-	Scopes      []string
-	Store       oauthStore
-	Cipher      *credentialCipher
-	Now         func() time.Time
+	Issuer          string
+	ResourceURL     string
+	BaseURL         string
+	ConsoleURL      string
+	ConsoleClientID string
+	ConsoleScopes   []string
+	Scopes          []string
+	Store           oauthStore
+	Cipher          *credentialCipher
+	Now             func() time.Time
 }
 
 type oauthBridge struct {
-	issuer      string
-	resourceURL string
-	baseURL     string
-	scopes      []string
-	scopeSet    map[string]struct{}
-	store       oauthStore
-	cipher      *credentialCipher
-	now         func() time.Time
-	limiter     *oauthRateLimiter
-	consentPage *template.Template
+	issuer        string
+	resourceURL   string
+	baseURL       string
+	consoleURL    string
+	consoleID     string
+	consoleScopes []string
+	scopes        []string
+	scopeSet      map[string]struct{}
+	store         oauthStore
+	cipher        *credentialCipher
+	now           func() time.Time
+	limiter       *oauthRateLimiter
 }
 
 type oauthClientRecord struct {
@@ -71,39 +76,52 @@ type oauthClientRecord struct {
 }
 
 type oauthAuthorizationRequest struct {
-	ID            string   `json:"id"`
-	ClientID      string   `json:"client_id"`
-	ClientName    string   `json:"client_name"`
-	RedirectURI   string   `json:"redirect_uri"`
-	State         string   `json:"state,omitempty"`
-	Scopes        []string `json:"scopes"`
-	Resource      string   `json:"resource"`
-	CodeChallenge string   `json:"code_challenge"`
+	ID                       string   `json:"id"`
+	ClientID                 string   `json:"client_id"`
+	ClientName               string   `json:"client_name"`
+	RedirectURI              string   `json:"redirect_uri"`
+	State                    string   `json:"state,omitempty"`
+	Scopes                   []string `json:"scopes"`
+	Resource                 string   `json:"resource"`
+	CodeChallenge            string   `json:"code_challenge"`
+	ConsoleState             string   `json:"console_state"`
+	EncryptedConsoleVerifier string   `json:"encrypted_console_verifier"`
 }
 
 type oauthAuthorizationCode struct {
-	ClientID            string   `json:"client_id"`
-	RedirectURI         string   `json:"redirect_uri"`
-	Scopes              []string `json:"scopes"`
-	Resource            string   `json:"resource"`
-	CodeChallenge       string   `json:"code_challenge"`
-	EncryptedCredential string   `json:"encrypted_credential"`
-	UserID              string   `json:"user_id"`
+	ClientID      string   `json:"client_id"`
+	RedirectURI   string   `json:"redirect_uri"`
+	Scopes        []string `json:"scopes"`
+	Resource      string   `json:"resource"`
+	CodeChallenge string   `json:"code_challenge"`
+	CredentialID  string   `json:"credential_id"`
+	UserID        string   `json:"user_id"`
 }
 
 type oauthGrantRecord struct {
-	ClientID            string   `json:"client_id"`
-	FamilyID            string   `json:"family_id"`
-	Scopes              []string `json:"scopes"`
-	Resource            string   `json:"resource"`
-	EncryptedCredential string   `json:"encrypted_credential"`
-	UserID              string   `json:"user_id"`
+	ClientID     string   `json:"client_id"`
+	FamilyID     string   `json:"family_id"`
+	Scopes       []string `json:"scopes"`
+	Resource     string   `json:"resource"`
+	CredentialID string   `json:"credential_id"`
+	UserID       string   `json:"user_id"`
 }
 
 type verifiedCredential struct {
 	UpstreamToken string
 	Scopes        []string
 	UserID        string
+}
+
+type consoleCredential struct {
+	AccessToken  string    `json:"access_token"`
+	RefreshToken string    `json:"refresh_token,omitempty"`
+	ExpiresAt    time.Time `json:"expires_at,omitempty"`
+}
+
+type oauthCredentialRecord struct {
+	EncryptedCredential string `json:"encrypted_credential"`
+	UserID              string `json:"user_id"`
 }
 
 type oauthRateWindow struct {
@@ -135,6 +153,20 @@ func newOAuthBridge(config oauthBridgeConfig) (*oauthBridge, error) {
 	if _, err := validatePublicURL("OAuth resource URL", config.ResourceURL); err != nil {
 		return nil, err
 	}
+	consoleURL, err := validatePublicURL("PipeOps Console URL", strings.TrimRight(config.ConsoleURL, "/"))
+	if err != nil {
+		return nil, err
+	}
+	if consoleURL.RawQuery != "" {
+		return nil, errors.New("PipeOps Console URL must not contain a query string")
+	}
+	if strings.TrimSpace(config.ConsoleClientID) == "" {
+		return nil, errors.New("PipeOps Console OAuth client ID is required")
+	}
+	consoleScopes := normalizedScopes(config.ConsoleScopes)
+	if len(consoleScopes) == 0 {
+		return nil, errors.New("PipeOps Console OAuth scopes are required")
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -146,24 +178,22 @@ func newOAuthBridge(config oauthBridgeConfig) (*oauthBridge, error) {
 	for _, scope := range scopes {
 		scopeSet[scope] = struct{}{}
 	}
-	page, err := template.New("consent").Parse(oauthConsentPage)
-	if err != nil {
-		return nil, fmt.Errorf("parse OAuth consent page: %w", err)
-	}
 	return &oauthBridge{
-		issuer:      strings.TrimRight(config.Issuer, "/"),
-		resourceURL: config.ResourceURL,
-		baseURL:     config.BaseURL,
-		scopes:      scopes,
-		scopeSet:    scopeSet,
-		store:       config.Store,
-		cipher:      config.Cipher,
-		now:         config.Now,
+		issuer:        strings.TrimRight(config.Issuer, "/"),
+		resourceURL:   config.ResourceURL,
+		baseURL:       config.BaseURL,
+		consoleURL:    strings.TrimRight(config.ConsoleURL, "/"),
+		consoleID:     strings.TrimSpace(config.ConsoleClientID),
+		consoleScopes: consoleScopes,
+		scopes:        scopes,
+		scopeSet:      scopeSet,
+		store:         config.Store,
+		cipher:        config.Cipher,
+		now:           config.Now,
 		limiter: &oauthRateLimiter{
 			windows: make(map[string]oauthRateWindow),
 			now:     config.Now,
 		},
-		consentPage: page,
 	}, nil
 }
 
@@ -172,6 +202,7 @@ func (b *oauthBridge) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/.well-known/openid-configuration", b.handleAuthorizationServerMetadata)
 	mux.HandleFunc("/oauth/register", b.handleRegistration)
 	mux.HandleFunc("/oauth/authorize", b.handleAuthorize)
+	mux.HandleFunc("/oauth/pipeops/callback", b.handleConsoleCallback)
 	mux.HandleFunc("/oauth/token", b.handleToken)
 	mux.HandleFunc("/oauth/revoke", b.handleRevocation)
 	mux.HandleFunc("/oauth/jwks", b.handleJWKS)
@@ -340,10 +371,8 @@ func (b *oauthBridge) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		b.beginAuthorization(w, r)
-	case http.MethodPost:
-		b.completeAuthorization(w, r)
 	default:
-		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
+		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
@@ -394,65 +423,106 @@ func (b *oauthBridge) beginAuthorization(w http.ResponseWriter, r *http.Request)
 	// request the complete protected-resource scope set during authorization.
 	// Open DCR is not a meaningful permission boundary because a client can
 	// immediately register again with broader scopes. Enforce the server's
-	// supported scopes here and show the exact requested set on the consent page.
+	// supported scopes here before redirecting to the PipeOps Console.
 	requestID, err := randomOAuthValue("poar_", 24)
 	if err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	consoleState, err := randomOAuthValue("pocs_", 24)
+	if err != nil {
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	consoleVerifier, err := randomOAuthValue("pocv_", 48)
+	if err != nil {
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	encryptedVerifier, err := b.cipher.Seal(consoleVerifier, oauthConsoleRequestAdditionalData(requestID))
+	if err != nil {
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	authorization := oauthAuthorizationRequest{
-		ID:            requestID,
-		ClientID:      client.ClientID,
-		ClientName:    client.ClientName,
-		RedirectURI:   redirectURI,
-		State:         query.Get("state"),
-		Scopes:        scopes,
-		Resource:      resource,
-		CodeChallenge: challenge,
+		ID:                       requestID,
+		ClientID:                 client.ClientID,
+		ClientName:               client.ClientName,
+		RedirectURI:              redirectURI,
+		State:                    query.Get("state"),
+		Scopes:                   scopes,
+		Resource:                 resource,
+		CodeChallenge:            challenge,
+		ConsoleState:             consoleState,
+		EncryptedConsoleVerifier: encryptedVerifier,
 	}
 	if err := putOAuthJSON(r.Context(), b.store, oauthLookupKey("request", requestID), &authorization, oauthAuthorizationRequestTTL); err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	b.renderConsentPage(w, authorization, "")
+	if err := b.store.Put(r.Context(), oauthLookupKey("console-state", consoleState), []byte(requestID), oauthAuthorizationRequestTTL); err != nil {
+		_ = b.store.Delete(r.Context(), oauthLookupKey("request", requestID))
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	http.Redirect(w, r, b.consoleAuthorizationURL(consoleState, consoleVerifier), http.StatusFound)
 }
 
-func (b *oauthBridge) completeAuthorization(w http.ResponseWriter, r *http.Request) {
-	if !b.allow(r, "authorize-submit", 20, time.Minute) {
+func (b *oauthBridge) handleConsoleCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !b.allow(r, "console-callback", 30, time.Minute) {
 		http.Error(w, "authorization rate limit exceeded", http.StatusTooManyRequests)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "invalid authorization request", http.StatusBadRequest)
+	state := r.URL.Query().Get("state")
+	requestID, err := b.store.Consume(r.Context(), oauthLookupKey("console-state", state))
+	if err != nil {
+		b.renderConsoleCallbackError(w, http.StatusBadRequest, "Authorization request expired", "Start the PipeOps connection again from your AI client.")
 		return
 	}
-	requestID := r.PostForm.Get("request_id")
 	var authorization oauthAuthorizationRequest
-	if err := getOAuthJSON(r.Context(), b.store, oauthLookupKey("request", requestID), &authorization); err != nil {
+	if err := getOAuthJSON(r.Context(), b.store, oauthLookupKey("request", string(requestID)), &authorization); err != nil {
 		if errors.Is(err, errOAuthRecordNotFound) {
-			http.Error(w, "authorization request expired", http.StatusBadRequest)
+			b.renderConsoleCallbackError(w, http.StatusBadRequest, "Authorization request expired", "Start the PipeOps connection again from your AI client.")
 		} else {
-			http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+			b.renderConsoleCallbackError(w, http.StatusServiceUnavailable, "Authorization unavailable", "Please try connecting again shortly.")
 		}
 		return
 	}
-	if r.PostForm.Get("action") == "deny" {
-		_, _ = b.store.Consume(r.Context(), oauthLookupKey("request", requestID))
+	if authorization.ConsoleState == "" || subtle.ConstantTimeCompare([]byte(state), []byte(authorization.ConsoleState)) != 1 {
+		b.renderConsoleCallbackError(w, http.StatusBadRequest, "Authorization request expired", "Start the PipeOps connection again from your AI client.")
+		return
+	}
+	if r.URL.Query().Get("error") != "" {
+		_, _ = b.store.Consume(r.Context(), oauthLookupKey("request", authorization.ID))
 		b.redirectAuthorizationError(w, r, authorization.RedirectURI, authorization.State, "access_denied", "access was denied")
 		return
 	}
-	serviceToken := strings.TrimSpace(r.PostForm.Get("service_token"))
-	if !strings.HasPrefix(serviceToken, "sat_") || strings.ContainsAny(serviceToken, " \t\r\n") {
-		b.renderConsentPage(w, authorization, "Enter a valid PipeOps workspace service token.")
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		b.renderConsoleCallbackError(w, http.StatusBadRequest, "Authorization failed", "PipeOps did not return an authorization code. Start the connection again.")
 		return
 	}
-	info, err := controllerTokenVerifier(b.baseURL)(r.Context(), serviceToken, r)
+	verifier, err := b.cipher.Open(authorization.EncryptedConsoleVerifier, oauthConsoleRequestAdditionalData(authorization.ID))
+	if err != nil {
+		b.renderConsoleCallbackError(w, http.StatusBadRequest, "Authorization request expired", "Start the PipeOps connection again from your AI client.")
+		return
+	}
+	credential, err := b.exchangeConsoleCode(r.Context(), code, verifier)
+	if err != nil {
+		b.renderConsoleCallbackError(w, http.StatusBadGateway, "PipeOps authorization failed", "Return to your AI client and start the connection again.")
+		return
+	}
+	info, err := controllerTokenVerifier(b.baseURL)(r.Context(), credential.AccessToken, r)
 	if err != nil || info == nil || info.UserID == "" {
-		b.renderConsentPage(w, authorization, "The service token could not be authorized. Use an active MCP token with api:read access.")
+		b.renderConsoleCallbackError(w, http.StatusUnauthorized, "PipeOps authorization failed", "Return to your AI client and start the connection again.")
 		return
 	}
-	consumed, err := b.store.Consume(r.Context(), oauthLookupKey("request", requestID))
+	consumed, err := b.store.Consume(r.Context(), oauthLookupKey("request", authorization.ID))
 	if err != nil {
 		if errors.Is(err, errOAuthRecordNotFound) {
 			http.Error(w, "authorization request already used", http.StatusBadRequest)
@@ -465,25 +535,33 @@ func (b *oauthBridge) completeAuthorization(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	aad := oauthGrantAdditionalData(authorization.ClientID, authorization.Scopes, authorization.Resource, info.UserID)
-	encrypted, err := b.cipher.Seal(serviceToken, aad)
+	credentialID, err := randomOAuthValue("pocr_", 24)
 	if err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	code, err := randomOAuthValue("poac_", 32)
+	encrypted, err := b.sealConsoleCredential(credentialID, info.UserID, credential)
+	if err != nil {
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := putOAuthJSON(r.Context(), b.store, oauthLookupKey("credential", credentialID), &oauthCredentialRecord{EncryptedCredential: encrypted, UserID: info.UserID}, oauthRefreshTokenTTL); err != nil {
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	code, err = randomOAuthValue("poac_", 32)
 	if err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	record := oauthAuthorizationCode{
-		ClientID:            authorization.ClientID,
-		RedirectURI:         authorization.RedirectURI,
-		Scopes:              authorization.Scopes,
-		Resource:            authorization.Resource,
-		CodeChallenge:       authorization.CodeChallenge,
-		EncryptedCredential: encrypted,
-		UserID:              info.UserID,
+		ClientID:      authorization.ClientID,
+		RedirectURI:   authorization.RedirectURI,
+		Scopes:        authorization.Scopes,
+		Resource:      authorization.Resource,
+		CodeChallenge: authorization.CodeChallenge,
+		CredentialID:  credentialID,
+		UserID:        info.UserID,
 	}
 	if err := putOAuthJSON(r.Context(), b.store, oauthLookupKey("code", code), &record, oauthAuthorizationCodeTTL); err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
@@ -499,34 +577,127 @@ func (b *oauthBridge) completeAuthorization(w http.ResponseWriter, r *http.Reque
 	http.Redirect(w, r, redirect.String(), http.StatusFound)
 }
 
-func (b *oauthBridge) renderConsentPage(w http.ResponseWriter, authorization oauthAuthorizationRequest, errorMessage string) {
-	scriptNonce, err := randomOAuthValue("", 18)
-	if err != nil {
-		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
-		return
+func (b *oauthBridge) consoleAuthorizationURL(state, verifier string) string {
+	consoleURL, _ := url.Parse(b.consoleURL)
+	endpoint := consoleURL.ResolveReference(&url.URL{Path: "/auth/signin"})
+	challenge := sha256.Sum256([]byte(verifier))
+	values := endpoint.Query()
+	values.Set("response_type", "code")
+	values.Set("client_id", b.consoleID)
+	values.Set("redirect_uri", b.issuer+"/oauth/pipeops/callback")
+	values.Set("scope", strings.Join(b.consoleScopes, " "))
+	values.Set("state", state)
+	values.Set("code_challenge", base64.RawURLEncoding.EncodeToString(challenge[:]))
+	values.Set("code_challenge_method", "S256")
+	values.Set("oauth", "true")
+	endpoint.RawQuery = values.Encode()
+	return endpoint.String()
+}
+
+func (b *oauthBridge) exchangeConsoleCode(ctx context.Context, code, verifier string) (consoleCredential, error) {
+	return b.requestConsoleToken(ctx, map[string]string{
+		"grant_type":    "authorization_code",
+		"code":          code,
+		"redirect_uri":  b.issuer + "/oauth/pipeops/callback",
+		"client_id":     b.consoleID,
+		"code_verifier": verifier,
+		"token_format":  "jwt",
+	})
+}
+
+func (b *oauthBridge) refreshConsoleCredential(ctx context.Context, credential consoleCredential) (consoleCredential, error) {
+	if credential.RefreshToken == "" {
+		return consoleCredential{}, errors.New("PipeOps refresh token unavailable")
 	}
+	refreshed, err := b.requestConsoleToken(ctx, map[string]string{
+		"grant_type":    "refresh_token",
+		"refresh_token": credential.RefreshToken,
+		"client_id":     b.consoleID,
+	})
+	if err != nil {
+		return consoleCredential{}, err
+	}
+	if refreshed.RefreshToken == "" {
+		refreshed.RefreshToken = credential.RefreshToken
+	}
+	return refreshed, nil
+}
+
+func (b *oauthBridge) requestConsoleToken(ctx context.Context, values map[string]string) (consoleCredential, error) {
+	body, err := json.Marshal(values)
+	if err != nil {
+		return consoleCredential{}, fmt.Errorf("encode PipeOps token request: %w", err)
+	}
+	endpoint, err := url.Parse(strings.TrimRight(b.baseURL, "/") + "/oauth/token")
+	if err != nil {
+		return consoleCredential{}, fmt.Errorf("build PipeOps token endpoint: %w", err)
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+	if err != nil {
+		return consoleCredential{}, fmt.Errorf("build PipeOps token request: %w", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	response, err := (&http.Client{
+		Timeout: 15 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}).Do(request)
+	if err != nil {
+		return consoleCredential{}, fmt.Errorf("send PipeOps token request: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return consoleCredential{}, errors.New("PipeOps token exchange was rejected")
+	}
+	var token struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int    `json:"expires_in"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 32<<10)).Decode(&token); err != nil {
+		return consoleCredential{}, fmt.Errorf("decode PipeOps token response: %w", err)
+	}
+	if token.AccessToken == "" {
+		return consoleCredential{}, errors.New("PipeOps token response did not include an access token")
+	}
+	credential := consoleCredential{AccessToken: token.AccessToken, RefreshToken: token.RefreshToken}
+	if token.ExpiresIn > 0 {
+		credential.ExpiresAt = b.now().Add(time.Duration(token.ExpiresIn) * time.Second)
+	}
+	return credential, nil
+}
+
+func (credential consoleCredential) needsRefresh(now time.Time) bool {
+	return !credential.ExpiresAt.IsZero() && !credential.ExpiresAt.After(now.Add(time.Minute))
+}
+
+func (b *oauthBridge) sealConsoleCredential(credentialID, userID string, credential consoleCredential) (string, error) {
+	encoded, err := json.Marshal(credential)
+	if err != nil {
+		return "", fmt.Errorf("encode PipeOps credential: %w", err)
+	}
+	return b.cipher.Seal(string(encoded), oauthCredentialAdditionalData(credentialID, userID))
+}
+
+func (b *oauthBridge) storeConsoleCredential(ctx context.Context, credentialID, userID string, credential consoleCredential) error {
+	if credentialID == "" || userID == "" {
+		return errOAuthRecordNotFound
+	}
+	encrypted, err := b.sealConsoleCredential(credentialID, userID, credential)
+	if err != nil {
+		return err
+	}
+	return putOAuthJSON(ctx, b.store, oauthLookupKey("credential", credentialID), &oauthCredentialRecord{EncryptedCredential: encrypted, UserID: userID}, oauthRefreshTokenTTL)
+}
+
+func (b *oauthBridge) renderConsoleCallbackError(w http.ResponseWriter, status int, title, message string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-"+scriptNonce+"'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
-	w.Header().Set("X-Frame-Options", "DENY")
-	data := struct {
-		RequestID    string
-		ClientName   string
-		RedirectHost string
-		Scopes       []string
-		ErrorMessage string
-		ScriptNonce  string
-	}{
-		RequestID:    authorization.ID,
-		ClientName:   authorization.ClientName,
-		RedirectHost: authorizationRedirectHost(authorization.RedirectURI),
-		Scopes:       authorization.Scopes,
-		ErrorMessage: errorMessage,
-		ScriptNonce:  scriptNonce,
-	}
-	if err := b.consentPage.Execute(w, data); err != nil {
-		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
-	}
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+	w.WriteHeader(status)
+	_, _ = fmt.Fprintf(w, "<!doctype html><html lang=\"en\"><title>%s</title><body><h1>%s</h1><p>%s</p></body></html>", title, title, message)
 }
 
 func (b *oauthBridge) handleToken(w http.ResponseWriter, r *http.Request) {
@@ -596,11 +767,11 @@ func (b *oauthBridge) exchangeAuthorizationCode(w http.ResponseWriter, r *http.R
 		return
 	}
 	b.issueInitialTokens(w, r, oauthGrantRecord{
-		ClientID:            record.ClientID,
-		Scopes:              record.Scopes,
-		Resource:            record.Resource,
-		EncryptedCredential: record.EncryptedCredential,
-		UserID:              record.UserID,
+		ClientID:     record.ClientID,
+		Scopes:       record.Scopes,
+		Resource:     record.Resource,
+		CredentialID: record.CredentialID,
+		UserID:       record.UserID,
 	})
 }
 
@@ -631,7 +802,7 @@ func (b *oauthBridge) exchangeRefreshToken(w http.ResponseWriter, r *http.Reques
 		b.writeTokenError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid or expired")
 		return
 	}
-	upstreamToken, err := b.openGrantCredential(record)
+	credential, err := b.openGrantCredential(r.Context(), record)
 	if err != nil {
 		b.writeTokenError(w, http.StatusBadRequest, "invalid_grant", "refresh token is invalid or expired")
 		return
@@ -646,8 +817,19 @@ func (b *oauthBridge) exchangeRefreshToken(w http.ResponseWriter, r *http.Reques
 		}
 		record.Scopes = scopes
 	}
-	record.EncryptedCredential, err = b.cipher.Seal(upstreamToken, oauthGrantAdditionalData(record.ClientID, record.Scopes, record.Resource, record.UserID))
-	if err != nil {
+	if credential.needsRefresh(b.now()) {
+		credential, err = b.refreshConsoleCredential(r.Context(), credential)
+		if err != nil {
+			_ = b.store.Delete(r.Context(), oauthLookupKey("credential", record.CredentialID))
+			b.writeTokenError(w, http.StatusBadRequest, "invalid_grant", "PipeOps authorization has expired")
+			return
+		}
+		if err := b.storeConsoleCredential(r.Context(), record.CredentialID, record.UserID, credential); err != nil {
+			b.writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "token service unavailable")
+			return
+		}
+	}
+	if record.CredentialID == "" {
 		b.writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "token service unavailable")
 		return
 	}
@@ -806,7 +988,13 @@ func (b *oauthBridge) handleRevocation(w http.ResponseWriter, r *http.Request) {
 		if record.ClientID != client.ClientID {
 			continue
 		}
-		if kind != "access" && record.FamilyID != "" {
+		if record.CredentialID != "" {
+			if err := b.store.Delete(r.Context(), oauthLookupKey("credential", record.CredentialID)); err != nil {
+				b.writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "revocation service unavailable")
+				return
+			}
+		}
+		if record.FamilyID != "" {
 			if err := b.store.RevokeRefreshFamily(r.Context(), oauthRefreshFamilyKey(record.FamilyID)); err != nil {
 				b.writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "revocation service unavailable")
 				return
@@ -832,12 +1020,35 @@ func (b *oauthBridge) revokeReusedRefreshToken(ctx context.Context, refreshToken
 	if used.ClientID != client.ClientID || used.FamilyID == "" {
 		return nil
 	}
-	return b.store.RevokeRefreshFamily(ctx, oauthRefreshFamilyKey(used.FamilyID))
+	if err := b.store.RevokeRefreshFamily(ctx, oauthRefreshFamilyKey(used.FamilyID)); err != nil {
+		return err
+	}
+	if used.CredentialID != "" {
+		return b.store.Delete(ctx, oauthLookupKey("credential", used.CredentialID))
+	}
+	return nil
 }
 
-func (b *oauthBridge) openGrantCredential(record oauthGrantRecord) (string, error) {
-	aad := oauthGrantAdditionalData(record.ClientID, record.Scopes, record.Resource, record.UserID)
-	return b.cipher.Open(record.EncryptedCredential, aad)
+func (b *oauthBridge) openGrantCredential(ctx context.Context, record oauthGrantRecord) (consoleCredential, error) {
+	if record.CredentialID == "" || record.UserID == "" {
+		return consoleCredential{}, errOAuthRecordNotFound
+	}
+	var stored oauthCredentialRecord
+	if err := getOAuthJSON(ctx, b.store, oauthLookupKey("credential", record.CredentialID), &stored); err != nil {
+		return consoleCredential{}, err
+	}
+	if stored.UserID != record.UserID {
+		return consoleCredential{}, errOAuthRecordNotFound
+	}
+	opened, err := b.cipher.Open(stored.EncryptedCredential, oauthCredentialAdditionalData(record.CredentialID, record.UserID))
+	if err != nil {
+		return consoleCredential{}, err
+	}
+	var credential consoleCredential
+	if err := json.Unmarshal([]byte(opened), &credential); err != nil || credential.AccessToken == "" {
+		return consoleCredential{}, errOAuthRecordNotFound
+	}
+	return credential, nil
 }
 
 func (b *oauthBridge) resolveAccessToken(ctx context.Context, token string) (*verifiedCredential, error) {
@@ -851,11 +1062,20 @@ func (b *oauthBridge) resolveAccessToken(ctx context.Context, token string) (*ve
 		}
 		return nil, err
 	}
-	upstreamToken, err := b.openGrantCredential(record)
+	credential, err := b.openGrantCredential(ctx, record)
 	if err != nil {
 		return nil, errOAuthRecordNotFound
 	}
-	info, err := controllerTokenVerifier(b.baseURL)(ctx, upstreamToken, nil)
+	if credential.needsRefresh(b.now()) {
+		credential, err = b.refreshConsoleCredential(ctx, credential)
+		if err != nil {
+			return nil, errOAuthRecordNotFound
+		}
+		if err := b.storeConsoleCredential(ctx, record.CredentialID, record.UserID, credential); err != nil {
+			return nil, err
+		}
+	}
+	info, err := controllerTokenVerifier(b.baseURL)(ctx, credential.AccessToken, nil)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidToken) {
 			return nil, errOAuthRecordNotFound
@@ -865,8 +1085,11 @@ func (b *oauthBridge) resolveAccessToken(ctx context.Context, token string) (*ve
 	if info == nil {
 		return nil, errOAuthRecordNotFound
 	}
+	if info.UserID != record.UserID {
+		return nil, errOAuthRecordNotFound
+	}
 	return &verifiedCredential{
-		UpstreamToken: upstreamToken,
+		UpstreamToken: credential.AccessToken,
 		Scopes:        append([]string(nil), record.Scopes...),
 		UserID:        record.UserID,
 	}, nil
@@ -1027,19 +1250,19 @@ func hashOAuthSecret(value string) string {
 	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
-func oauthGrantAdditionalData(clientID string, scopes []string, resource, userID string) []byte {
+func oauthCredentialAdditionalData(credentialID, userID string) []byte {
 	encoded, _ := json.Marshal(struct {
-		ClientID string   `json:"client_id"`
-		Scopes   []string `json:"scopes"`
-		Resource string   `json:"resource"`
-		UserID   string   `json:"user_id"`
+		CredentialID string `json:"credential_id"`
+		UserID       string `json:"user_id"`
 	}{
-		ClientID: clientID,
-		Scopes:   scopes,
-		Resource: resource,
-		UserID:   userID,
+		CredentialID: credentialID,
+		UserID:       userID,
 	})
 	return encoded
+}
+
+func oauthConsoleRequestAdditionalData(requestID string) []byte {
+	return []byte("pipeops-mcp-console-pkce:" + requestID)
 }
 
 func oauthRefreshFamilyKey(familyID string) string {
@@ -1123,92 +1346,3 @@ func authorizationRedirectHost(value string) string {
 	}
 	return parsed.Host
 }
-
-const oauthConsentPage = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Connect PipeOps</title>
-  <style>
-    :root { color-scheme: light dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #07111f; color: #eaf2ff; }
-    main { width: min(92vw, 32rem); box-sizing: border-box; padding: 2rem; border: 1px solid #24364d; border-radius: 1rem; background: #0d1b2d; box-shadow: 0 1.5rem 4rem #0008; }
-    h1 { margin-top: 0; font-size: 1.5rem; }
-    p, li { color: #b9c9dc; line-height: 1.55; }
-    label { display: block; margin: 1.25rem 0 .5rem; font-weight: 650; }
-    input { width: 100%; box-sizing: border-box; padding: .85rem; border: 1px solid #3a506d; border-radius: .6rem; background: #07111f; color: #fff; }
-    input[aria-invalid="true"] { border-color: #ff7b8b; outline-color: #ff7b8b; }
-    .actions { display: flex; gap: .75rem; margin-top: 1.25rem; }
-    button { border: 0; border-radius: .6rem; padding: .8rem 1rem; font-weight: 700; cursor: pointer; }
-    button:disabled { cursor: wait; opacity: .7; }
-    button[value="approve"] { background: #5b8cff; color: #06101d; }
-    button[value="deny"] { background: #24364d; color: #eaf2ff; }
-    .error { padding: .75rem; border-radius: .5rem; background: #4a1720; color: #ffd9df; }
-    a { color: #8eb1ff; }
-    code { font-size: .9em; }
-  </style>
-</head>
-<body>
-<main>
-  <h1>Connect {{.ClientName}} to PipeOps</h1>
-  <p>This client is requesting access through the hosted PipeOps MCP server. After approval, access is returned to <strong>{{.RedirectHost}}</strong>.</p>
-  <p>Continue only if you started this connection from that client.</p>
-  <ul>{{range .Scopes}}<li><code>{{.}}</code></li>{{end}}</ul>
-  {{if .ErrorMessage}}<p class="error" role="alert">{{.ErrorMessage}}</p>{{end}}
-  <form method="post" action="/oauth/authorize">
-    <input type="hidden" name="request_id" value="{{.RequestID}}">
-    <label for="service_token">Workspace service token</label>
-    <input id="service_token" name="service_token" type="password" autocomplete="off" spellcheck="false" aria-describedby="service_token_help form_error" required autofocus>
-    <p id="service_token_help">Create a dedicated token under <a href="https://console.pipeops.io/dashboard/integrations?cloudIntegrations=tokens" target="_blank" rel="noopener noreferrer">PipeOps Service Tokens</a>. Use <code>api:read</code> first and add <code>api:write</code> only when needed.</p>
-    <p id="form_error" class="error" role="alert" aria-live="assertive" hidden></p>
-    <div class="actions">
-      <button type="submit" name="action" value="approve">Connect</button>
-      <button type="submit" name="action" value="deny" formnovalidate>Cancel</button>
-    </div>
-  </form>
-</main>
-<script nonce="{{.ScriptNonce}}">
-  (() => {
-    const form = document.querySelector("form");
-    const token = document.getElementById("service_token");
-    const error = document.getElementById("form_error");
-    const connect = form.querySelector('button[value="approve"]');
-
-    const showError = (message) => {
-      error.textContent = message;
-      error.hidden = false;
-      token.setAttribute("aria-invalid", "true");
-      token.focus();
-    };
-    const clearError = () => {
-      error.textContent = "";
-      error.hidden = true;
-      token.removeAttribute("aria-invalid");
-    };
-
-    form.addEventListener("invalid", (event) => {
-      if (event.target === token) {
-        event.preventDefault();
-        showError("Paste a PipeOps workspace service token before connecting.");
-      }
-    }, true);
-    token.addEventListener("input", clearError);
-    form.addEventListener("submit", (event) => {
-      if (event.submitter?.value === "deny") return;
-      const value = token.value.trim();
-      if (!value.startsWith("sat_") || /\s/.test(value)) {
-        event.preventDefault();
-        showError("Enter a valid PipeOps workspace service token beginning with sat_.");
-        return;
-      }
-      token.value = value;
-      clearError();
-      form.setAttribute("aria-busy", "true");
-      connect.disabled = true;
-      connect.textContent = "Connecting…";
-    });
-  })();
-</script>
-</body>
-</html>`
