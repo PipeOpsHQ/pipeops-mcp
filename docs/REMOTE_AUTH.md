@@ -59,7 +59,21 @@ the public issuer is different. Route the public hostname to port 8080 and
 terminate TLS at the ingress or load balancer. Use `/healthz` for health probes.
 
 Do not configure a shared `PIPEOPS_TOKEN` on the hosted process. Each customer
-authorizes their own dedicated workspace service token.
+authorizes their own PipeOps Console session. Bridge mode redirects to the same
+PKCE Console sign-in flow used by `pipeops login`; it never asks customers to
+paste a service token.
+
+The default Console OAuth settings are:
+
+```text
+PIPEOPS_CONSOLE_OAUTH_URL=https://console.pipeops.io
+PIPEOPS_CONSOLE_OAUTH_CLIENT_ID=pipeops_public_client
+PIPEOPS_CONSOLE_OAUTH_SCOPES=openid,profile,email
+```
+
+Override them only for a non-production Console environment. The Console OAuth
+client must permit `https://mcp.pipeops.app/oauth/pipeops/callback` as its
+redirect URI in production (or the equivalent callback for a custom issuer).
 
 ## OAuth endpoints
 
@@ -83,21 +97,24 @@ that require the metadata field.
 
 ## Credential and scope model
 
-The consent page accepts only a `sat_...` PipeOps workspace service token and
-validates it with the workspace-scoped `GET /workspace` route. The response must
-contain exactly the token's one bound workspace. The token is encrypted using
-AES-256-GCM before it is written to the configured store. OAuth access, refresh,
-and authorization codes are stored under SHA-256 lookup keys, so their plaintext
-values are not used as database keys.
+The bridge starts a separate authorization-code-with-PKCE flow against the
+PipeOps Console after an MCP client begins authorization. The Console callback
+is bound to the original MCP authorization request and can be used once. The
+bridge exchanges the Console code server-side, validates the resulting PipeOps
+user credential with `GET /profile/data`, then encrypts the access and refresh
+credentials using AES-256-GCM before writing them to the configured store.
+OAuth access, refresh, and authorization codes are stored under SHA-256 lookup
+keys, so their plaintext values are not used as database keys.
 
 The bridge exposes two scopes:
 
 - `api:read` exposes only tools annotated as read-only.
 - `api:write` exposes read and mutating tools.
 
-The upstream PipeOps service token remains the final authority. An OAuth grant
-cannot make the underlying service token more powerful. Direct Bearer-token
-clients keep the existing tool surface and are authorized by the controller.
+The upstream PipeOps user session remains the final authority. An OAuth grant
+cannot grant tools outside its MCP scope, and expired Console credentials require
+the customer to authorize again. Direct Bearer-token clients keep the existing
+tool surface and are authorized by the controller.
 
 Current lifetimes are 5 minutes for authorization codes, 15 minutes for access
 tokens, and 30 days for refresh tokens. Authorization codes are single-use and
@@ -113,12 +130,12 @@ revokes the active refresh token in that authorization family.
   immediately invalidates existing encrypted grants unless a migration is run.
 - Apply distributed rate limiting at the ingress. The process also has a local
   per-instance limiter for registration, authorization, and token requests.
-- Do not log authorization headers, service tokens, OAuth codes, or request
-  bodies from consent and token endpoints.
+- Do not log authorization headers, Console access or refresh tokens, OAuth
+  codes, or request bodies from authorization and token endpoints.
 - Monitor `401` and `503` rates. Missing/expired credentials fail with `401`;
   persistence or PipeOps validation failures fail closed with `503`.
-- Ask customers to create a dedicated, least-privilege service token for each AI
-  client and revoke it from PipeOps when access is no longer needed.
+- Customers can disconnect an AI client by revoking its bridge OAuth token;
+  ending or revoking their PipeOps session also stops upstream authorization.
 
 ## Acceptance checks
 
@@ -145,10 +162,10 @@ go vet ./...
 go build ./cmd/pipeops-mcp-server
 ```
 
-Then connect one OAuth client end to end, approve only `api:read`, and verify
+Then connect one OAuth client end to end, sign in through Console, request only `api:read`, and verify
 that list/get tools appear while create/update/delete/deploy tools do not. Repeat
-with `api:write` and verify the full tool surface. Finally, revoke the OAuth
-token and the underlying PipeOps service token independently and confirm both
+with `api:write` and verify the full tool surface. Finally, revoke the bridge
+OAuth token and end the underlying PipeOps session independently; confirm both
 paths stop authorizing requests.
 
 ## Future native PipeOps OAuth

@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -51,12 +50,23 @@ func TestOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t *testing.T) {
 
 func testOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t *testing.T, store oauthStore) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/workspace" || r.Header.Get("Authorization") != "Bearer sat_valid" {
+		switch r.URL.Path {
+		case "/oauth/token":
+			var request map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["grant_type"] == "" {
+				http.Error(w, "invalid token request", http.StatusBadRequest)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "console_access", "refresh_token": "console_refresh", "expires_in": 3600})
+		case "/profile/data":
+			if r.Header.Get("Authorization") != "Bearer console_access" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			_, _ = io.WriteString(w, `{"success":true,"message":"ok","data":{"user":{"uuid":"user-1"}}}`)
+		default:
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"success":true,"message":"ok","data":[{"uuid":"workspace-user","name":"Test"}]}`)
 	}))
 	defer api.Close()
 
@@ -79,61 +89,19 @@ func testOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t *testing.T, store oau
 		"code_challenge_method": {"S256"},
 	}.Encode()
 
-	response, err := http.Get(authorizeURL)
+	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	response, err := noRedirect.Get(authorizeURL)
 	if err != nil {
 		t.Fatalf("begin authorization: %v", err)
 	}
 	page, _ := io.ReadAll(response.Body)
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusOK {
+	if response.StatusCode != http.StatusFound {
 		t.Fatalf("authorize status = %d; body = %s", response.StatusCode, page)
 	}
-	for _, expected := range []string{
-		`id="form_error"`,
-		`Paste a PipeOps workspace service token before connecting.`,
-		`Enter a valid PipeOps workspace service token beginning with sat_.`,
-		`connect.textContent = "Connecting…"`,
-	} {
-		if !strings.Contains(string(page), expected) {
-			t.Fatalf("authorization page missing visible submit feedback %q: %s", expected, page)
-		}
-	}
-	nonceMatch := regexp.MustCompile(`<script nonce="([^"]+)">`).FindSubmatch(page)
-	if len(nonceMatch) != 2 {
-		t.Fatalf("authorization page missing script nonce: %s", page)
-	}
-	csp := response.Header.Get("Content-Security-Policy")
-	if !strings.Contains(csp, "script-src 'nonce-"+string(nonceMatch[1])+"'") {
-		t.Fatalf("authorization page CSP does not allow its nonce: %q", csp)
-	}
-	match := regexp.MustCompile(`name="request_id" value="([^"]+)"`).FindSubmatch(page)
-	if len(match) != 2 {
-		t.Fatalf("authorization page missing request id: %s", page)
-	}
-
-	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	response, err = noRedirect.PostForm(server.URL+"/oauth/authorize", url.Values{
-		"request_id":    {string(match[1])},
-		"service_token": {"sat_valid"},
-		"action":        {"approve"},
-	})
-	if err != nil {
-		t.Fatalf("complete authorization: %v", err)
-	}
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusFound {
-		t.Fatalf("authorization completion status = %d", response.StatusCode)
-	}
-	redirect, err := url.Parse(response.Header.Get("Location"))
-	if err != nil {
-		t.Fatalf("parse authorization redirect: %v", err)
-	}
-	code := redirect.Query().Get("code")
-	if code == "" || redirect.Query().Get("state") != "state-123" {
-		t.Fatalf("unexpected authorization redirect: %s", redirect)
-	}
+	code := completeConsoleAuthorization(t, server.URL, response.Header.Get("Location"), "console-code")
 
 	wrongResource := postOAuthForm(t, server.URL+"/oauth/token", url.Values{
 		"grant_type":    {"authorization_code"},
@@ -324,12 +292,18 @@ func TestOAuthBridgeRegistrationIgnoresUnknownMetadata(t *testing.T) {
 
 func TestOAuthBridgeAllowsSupportedAuthorizationScopesBeyondRegistrationDefaults(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/workspace" || r.Header.Get("Authorization") != "Bearer sat_claude" {
+		switch r.URL.Path {
+		case "/oauth/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "claude_console_access", "refresh_token": "claude_console_refresh", "expires_in": 3600})
+		case "/profile/data":
+			if r.Header.Get("Authorization") != "Bearer claude_console_access" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			_, _ = io.WriteString(w, `{"success":true,"message":"ok","data":{"user":{"uuid":"claude-user"}}}`)
+		default:
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"success":true,"message":"ok","data":[{"uuid":"claude-workspace","name":"Claude"}]}`)
 	}))
 	defer api.Close()
 
@@ -374,41 +348,11 @@ func TestOAuthBridgeAllowsSupportedAuthorizationScopesBeyondRegistrationDefaults
 	if err != nil {
 		t.Fatalf("begin Claude authorization: %v", err)
 	}
-	body, _ := io.ReadAll(response.Body)
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		t.Fatalf("Claude authorization status = %d; location = %s; body = %s", response.StatusCode, response.Header.Get("Location"), body)
+	if response.StatusCode != http.StatusFound {
+		t.Fatalf("Claude authorization status = %d; location = %s", response.StatusCode, response.Header.Get("Location"))
 	}
-	for _, scopeItem := range []string{"<li><code>api:read</code></li>", "<li><code>api:write</code></li>"} {
-		if !strings.Contains(string(body), scopeItem) {
-			t.Fatalf("Claude authorization page does not show requested scope %q: %s", scopeItem, body)
-		}
-	}
-	requestID := regexp.MustCompile(`name="request_id" value="([^"]+)"`).FindSubmatch(body)
-	if len(requestID) != 2 {
-		t.Fatalf("Claude authorization page missing request id: %s", body)
-	}
-
-	approved, err := noRedirect.PostForm(server.URL+"/oauth/authorize", url.Values{
-		"request_id":    {string(requestID[1])},
-		"service_token": {"sat_claude"},
-		"action":        {"approve"},
-	})
-	if err != nil {
-		t.Fatalf("approve Claude authorization: %v", err)
-	}
-	_ = approved.Body.Close()
-	if approved.StatusCode != http.StatusFound {
-		t.Fatalf("Claude approval status = %d", approved.StatusCode)
-	}
-	approvalRedirect, err := url.Parse(approved.Header.Get("Location"))
-	if err != nil {
-		t.Fatalf("parse Claude approval redirect: %v", err)
-	}
-	code := approvalRedirect.Query().Get("code")
-	if code == "" || approvalRedirect.Query().Get("state") != "claude-state" {
-		t.Fatalf("unexpected Claude approval redirect: %s", approvalRedirect)
-	}
+	code := completeConsoleAuthorization(t, server.URL, response.Header.Get("Location"), "claude-console-code")
 
 	exchanged := postOAuthForm(t, server.URL+"/oauth/token", url.Values{
 		"grant_type":    {"authorization_code"},
@@ -493,24 +437,91 @@ func TestOAuthBridgeAllowsSupportedAuthorizationScopesBeyondRegistrationDefaults
 	}
 }
 
-func TestOAuthCredentialEncryptionBindsGrantMetadata(t *testing.T) {
+func TestOAuthCredentialEncryptionBindsCredentialIdentity(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 	cipher, err := newCredentialCipher(key)
 	if err != nil {
 		t.Fatalf("create cipher: %v", err)
 	}
-	readGrant := oauthGrantAdditionalData("client", []string{"api:read"}, "https://mcp.pipeops.test/mcp", "user")
-	sealed, err := cipher.Seal("sat_secret", readGrant)
+	credentialData := oauthCredentialAdditionalData("credential", "user")
+	sealed, err := cipher.Seal("console-credential", credentialData)
 	if err != nil {
 		t.Fatalf("seal credential: %v", err)
 	}
-	opened, err := cipher.Open(sealed, readGrant)
-	if err != nil || opened != "sat_secret" {
+	opened, err := cipher.Open(sealed, credentialData)
+	if err != nil || opened != "console-credential" {
 		t.Fatalf("open credential: value=%q err=%v", opened, err)
 	}
-	writeGrant := oauthGrantAdditionalData("client", []string{"api:write"}, "https://mcp.pipeops.test/mcp", "user")
-	if _, err := cipher.Open(sealed, writeGrant); err == nil {
-		t.Fatal("credential decrypted after OAuth grant scopes were changed")
+	wrongCredentialData := oauthCredentialAdditionalData("credential", "another-user")
+	if _, err := cipher.Open(sealed, wrongCredentialData); err == nil {
+		t.Fatal("credential decrypted after its owner changed")
+	}
+}
+
+func TestOAuthBridgeRefreshesExpiredConsoleCredential(t *testing.T) {
+	var refreshCalls int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			var request map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["grant_type"] != "refresh_token" || request["refresh_token"] != "old-refresh" {
+				http.Error(w, "invalid refresh", http.StatusBadRequest)
+				return
+			}
+			refreshCalls++
+			_, _ = io.WriteString(w, `{"access_token":"renewed-access","refresh_token":"renewed-refresh","expires_in":3600}`)
+		case "/profile/data":
+			if r.Header.Get("Authorization") != "Bearer renewed-access" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			_, _ = io.WriteString(w, `{"success":true,"data":{"user":{"uuid":"user-1"}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer api.Close()
+
+	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	cipher, err := newCredentialCipher(key)
+	if err != nil {
+		t.Fatalf("create cipher: %v", err)
+	}
+	store := newMemoryOAuthStore()
+	bridge, err := newOAuthBridge(oauthBridgeConfig{
+		Issuer:          "https://mcp.pipeops.test",
+		ResourceURL:     "https://mcp.pipeops.test/mcp",
+		BaseURL:         api.URL,
+		ConsoleURL:      "https://console.pipeops.test",
+		ConsoleClientID: "pipeops_public_client",
+		ConsoleScopes:   []string{"openid", "profile", "email"},
+		Scopes:          []string{"api:read"},
+		Store:           store,
+		Cipher:          cipher,
+	})
+	if err != nil {
+		t.Fatalf("create bridge: %v", err)
+	}
+	credentialID := "pocr_test"
+	credential := consoleCredential{AccessToken: "expired-access", RefreshToken: "old-refresh", ExpiresAt: time.Now().Add(-time.Minute)}
+	if err := bridge.storeConsoleCredential(context.Background(), credentialID, "user-1", credential); err != nil {
+		t.Fatalf("store Console credential: %v", err)
+	}
+	grant := oauthGrantRecord{ClientID: "client", Scopes: []string{"api:read"}, Resource: "https://mcp.pipeops.test/mcp", CredentialID: credentialID, UserID: "user-1"}
+	if err := putOAuthJSON(context.Background(), store, oauthLookupKey("access", "poat_test"), &grant, oauthAccessTokenTTL); err != nil {
+		t.Fatalf("store grant: %v", err)
+	}
+
+	resolved, err := bridge.resolveAccessToken(context.Background(), "poat_test")
+	if err != nil {
+		t.Fatalf("resolve access token: %v", err)
+	}
+	if resolved.UpstreamToken != "renewed-access" || refreshCalls != 1 {
+		t.Fatalf("refreshed credential = %#v, calls = %d", resolved, refreshCalls)
+	}
+	stored, err := bridge.openGrantCredential(context.Background(), grant)
+	if err != nil || stored.AccessToken != "renewed-access" || stored.RefreshToken != "renewed-refresh" {
+		t.Fatalf("persisted refreshed credential = %#v, err = %v", stored, err)
 	}
 }
 
@@ -655,6 +666,48 @@ func exchangeOAuthCode(t *testing.T, serverURL, clientID, code, verifier string)
 		t.Fatalf("decode token response: %v", err)
 	}
 	return tokens
+}
+
+func completeConsoleAuthorization(t *testing.T, serverURL, consoleLocation, consoleCode string) string {
+	t.Helper()
+	consoleURL, err := url.Parse(consoleLocation)
+	if err != nil {
+		t.Fatalf("parse Console authorization URL: %v", err)
+	}
+	query := consoleURL.Query()
+	if consoleURL.Path != "/auth/signin" || query.Get("response_type") != "code" || query.Get("client_id") != "pipeops_public_client" {
+		t.Fatalf("unexpected Console authorization request: %s", consoleURL)
+	}
+	if query.Get("redirect_uri") != "https://mcp.pipeops.test/oauth/pipeops/callback" || query.Get("state") == "" {
+		t.Fatalf("Console callback binding is missing: %s", consoleURL)
+	}
+	if query.Get("code_challenge_method") != "S256" || len(query.Get("code_challenge")) < 43 {
+		t.Fatalf("Console PKCE challenge is missing: %s", consoleURL)
+	}
+	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	response, err := noRedirect.Get(serverURL + "/oauth/pipeops/callback?" + url.Values{
+		"state": {query.Get("state")},
+		"code":  {consoleCode},
+	}.Encode())
+	if err != nil {
+		t.Fatalf("complete Console authorization: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusFound {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("Console callback status = %d; body = %s", response.StatusCode, body)
+	}
+	redirect, err := url.Parse(response.Header.Get("Location"))
+	if err != nil {
+		t.Fatalf("parse MCP client callback: %v", err)
+	}
+	code := redirect.Query().Get("code")
+	if code == "" {
+		t.Fatalf("MCP client callback has no code: %s", redirect)
+	}
+	return code
 }
 
 func postOAuthForm(t *testing.T, endpoint string, values url.Values) testHTTPResponse {
