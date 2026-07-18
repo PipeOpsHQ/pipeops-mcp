@@ -277,15 +277,7 @@ func defaultMCPScopes() []string {
 }
 
 func defaultChallengeScope(scopes []string) string {
-	for _, scope := range scopes {
-		if scope == "api:read" {
-			return scope
-		}
-	}
-	if len(scopes) > 0 {
-		return scopes[0]
-	}
-	return ""
+	return strings.Join(normalizedScopes(scopes), " ")
 }
 
 func validateAbsoluteURL(name, value string) (*url.URL, error) {

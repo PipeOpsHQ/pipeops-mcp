@@ -244,7 +244,7 @@ func TestHTTPHandlerRequiresBearerAuthentication(t *testing.T) {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusUnauthorized)
 	}
 	challenge := recorder.Header().Get("WWW-Authenticate")
-	if challenge != `Bearer resource_metadata="https://mcp.pipeops.test/.well-known/oauth-protected-resource", scope="api:read"` {
+	if challenge != `Bearer resource_metadata="https://mcp.pipeops.test/.well-known/oauth-protected-resource", scope="api:read api:write"` {
 		t.Fatalf("WWW-Authenticate = %q", challenge)
 	}
 	if got := recorder.Header().Get("X-Content-Type-Options"); got != "nosniff" {
