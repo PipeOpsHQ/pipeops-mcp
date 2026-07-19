@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -187,6 +188,70 @@ func TestAssertWritableDirectory(t *testing.T) {
 	missing := filepath.Join(dir, "missing-subdir")
 	if err := assertWritableDirectory(missing); err == nil {
 		t.Fatal("expected error for missing directory")
+	}
+}
+
+func TestOAuthSQLitePathCandidatesIncludeFallbacks(t *testing.T) {
+	t.Parallel()
+	preferred := filepath.Join(t.TempDir(), "preferred", "oauth.db")
+	candidates := oauthSQLitePathCandidates(preferred)
+	if len(candidates) < 2 {
+		t.Fatalf("expected preferred + fallback(s), got %v", candidates)
+	}
+	if candidates[0] != preferred && !strings.HasSuffix(candidates[0], filepath.Join("preferred", "oauth.db")) {
+		// Abs may rewrite; ensure preferred is first by basename chain.
+		if filepath.Base(filepath.Dir(candidates[0])) != "preferred" {
+			t.Fatalf("first candidate should be preferred path, got %v", candidates)
+		}
+	}
+	foundTmp := false
+	for _, c := range candidates[1:] {
+		if strings.Contains(c, "pipeops-mcp-oauth") {
+			foundTmp = true
+			break
+		}
+	}
+	if !foundTmp {
+		t.Fatalf("expected tmp fallback in %v", candidates)
+	}
+}
+
+func TestSQLiteOAuthStoreFallsBackWhenPreferredUnwritable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("permission simulation is POSIX-specific")
+	}
+	// Create a preferred parent that exists but is not writable by the process.
+	// chmod 0555 on a directory we own still allows us to chmod back; write fails
+	// for non-owner only. Simulate unusable preferred by pointing at a file path
+	// under a missing parent that we replace with a non-directory.
+	blockedRoot := t.TempDir()
+	blockedParent := filepath.Join(blockedRoot, "blocked")
+	// Put a file where the directory should be so MkdirAll fails differently —
+	// instead remove write bits from preferred directory after creating it.
+	if err := os.MkdirAll(blockedParent, 0o700); err != nil {
+		t.Fatalf("mkdir blocked: %v", err)
+	}
+	// 0555: owner can still write on some systems; use 0 for max restriction.
+	// On macOS/Linux, 0555 still allows owner write in some cases... actually
+	// mode 0555 means no write bit so CreateTemp should fail for owner too.
+	if err := os.Chmod(blockedParent, 0o555); err != nil {
+		t.Fatalf("chmod blocked: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(blockedParent, 0o700) })
+
+	preferred := filepath.Join(blockedParent, "oauth.db")
+	store, err := newSQLiteOAuthStore(context.Background(), preferred)
+	if err != nil {
+		t.Fatalf("expected fallback open to succeed, got %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	if err := store.Put(context.Background(), "k", []byte("v"), time.Minute); err != nil {
+		t.Fatalf("put on fallback store: %v", err)
+	}
+	value, err := store.Get(context.Background(), "k")
+	if err != nil || string(value) != "v" {
+		t.Fatalf("get on fallback store: value=%q err=%v", value, err)
 	}
 }
 

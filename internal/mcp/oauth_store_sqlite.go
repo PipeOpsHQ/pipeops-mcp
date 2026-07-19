@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -28,17 +29,78 @@ type sqliteOAuthStore struct {
 	now func() time.Time
 }
 
+// newSQLiteOAuthStore opens the OAuth SQLite database at path, falling back to
+// writable locations when the preferred path is not usable (common when a
+// root-owned PVC is mounted over /data without fsGroup for the nonroot user).
 func newSQLiteOAuthStore(ctx context.Context, path string) (*sqliteOAuthStore, error) {
-	if path == "" {
+	candidates := oauthSQLitePathCandidates(path)
+	if len(candidates) == 0 {
 		return nil, errors.New("OAuth SQLite path is required")
 	}
-	absolutePath, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve OAuth SQLite path: %w", err)
+
+	var errs []error
+	for i, candidate := range candidates {
+		store, err := openSQLiteOAuthStoreAt(ctx, candidate)
+		if err == nil {
+			if i > 0 {
+				// Preferred path failed (typically permission denied on /data).
+				// Ephemeral /tmp keeps the process healthy; fix PVC ownership for persistence.
+				fmt.Fprintf(os.Stderr, "pipeops-mcp: OAuth SQLite path %q is not usable; using %q instead (sessions may not persist across restarts). Fix volume ownership (fsGroup 65532) or set PIPEOPS_OAUTH_SQLITE_PATH to a writable path. First error: %v\n",
+					candidates[0], candidate, errors.Join(errs...))
+			}
+			return store, nil
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", candidate, err))
+	}
+	return nil, fmt.Errorf("open OAuth SQLite store: no writable path among %v: %w", candidates, errors.Join(errs...))
+}
+
+// oauthSQLitePathCandidates returns preferred path first, then always-writable
+// fallbacks for restricted container volumes.
+func oauthSQLitePathCandidates(preferred string) []string {
+	preferred = strings.TrimSpace(preferred)
+	if preferred == "" {
+		preferred = defaultSQLitePath
+	}
+
+	seen := make(map[string]struct{}, 4)
+	out := make([]string, 0, 4)
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			abs = p
+		}
+		if _, ok := seen[abs]; ok {
+			return
+		}
+		seen[abs] = struct{}{}
+		out = append(out, abs)
+	}
+
+	add(preferred)
+	add(filepath.Join(os.TempDir(), "pipeops-mcp-oauth", "pipeops-mcp-oauth.db"))
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".pipeops-mcp", "oauth", "pipeops-mcp-oauth.db"))
+	}
+	return out
+}
+
+func openSQLiteOAuthStoreAt(ctx context.Context, absolutePath string) (*sqliteOAuthStore, error) {
+	if absolutePath == "" {
+		return nil, errors.New("OAuth SQLite path is required")
 	}
 	directory := filepath.Dir(absolutePath)
 	if err := ensureOAuthSQLiteDirectory(directory); err != nil {
 		return nil, err
+	}
+	// Explicit write probe before opening the driver so fallback can run when
+	// the directory exists but is not writable by this process (root-owned PVC).
+	if err := assertWritableDirectory(directory); err != nil {
+		return nil, fmt.Errorf("OAuth SQLite directory %q is not writable: %w", directory, err)
 	}
 	file, err := os.OpenFile(absolutePath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {

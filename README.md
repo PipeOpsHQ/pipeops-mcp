@@ -91,9 +91,10 @@ persistent volume at `/data` when using SQLite so OAuth connections survive
 container replacement. Use Redis only when multiple MCP replicas need shared
 state. The mounted directory must be writable by UID/GID `65532`; the server
 prefers `/data/oauth` private with mode `0700` and database files at mode
-`0600`, but continues when volume mounts reject `chmod` as long as the path is
-writable. Do not set a shared `PIPEOPS_TOKEN` on the hosted service; each customer
-authorizes their own PipeOps Console session.
+`0600`. If `/data` is not writable (root-owned PVC without `fsGroup: 65532`),
+it falls back to a path under `$TMPDIR` so the process still starts (sessions
+may not survive restarts). Do not set a shared `PIPEOPS_TOKEN` on the hosted
+service; each customer authorizes their own PipeOps Console session.
 
 ## Usage
 
