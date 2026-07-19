@@ -45,10 +45,21 @@ replacement. Run one MCP replica in SQLite mode; do not put the SQLite file on
 a shared network filesystem. The mounted directory must be writable by the
 container user (UID/GID `65532`). Prefer mode `0700` on `/data/oauth` and
 `0600` on the database/WAL files; the server applies those modes when the
-filesystem allows. Some PVC/CSI mount points reject `chmod` — startup still
-succeeds when the path is writable (OAuth material is encrypted at rest with
-`PIPEOPS_OAUTH_ENCRYPTION_KEY`). On Kubernetes, set `fsGroup: 65532` (and
-optionally mount the volume at `/data`) so the nonroot user can create files.
+filesystem allows. Some PVC/CSI mount points reject `chmod` or are root-owned
+without write access for the nonroot user. In that case the server falls back
+to `$TMPDIR/pipeops-mcp-oauth/` (ephemeral — OAuth sessions may reset on
+restart) and logs a warning. For durable SQLite on Kubernetes:
+
+```yaml
+securityContext:
+  fsGroup: 65532
+  runAsUser: 65532
+  runAsGroup: 65532
+```
+
+Mount the volume at `/data` (or set `PIPEOPS_OAUTH_SQLITE_PATH` to a path the
+process can write). OAuth material is encrypted at rest with
+`PIPEOPS_OAUTH_ENCRYPTION_KEY`.
 
 For multiple MCP replicas, use shared Redis 6.2 or newer instead:
 
