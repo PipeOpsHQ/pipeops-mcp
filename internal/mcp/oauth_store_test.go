@@ -145,6 +145,51 @@ func TestSQLiteOAuthStoreSecuresPublicDirectory(t *testing.T) {
 	}
 }
 
+func TestEnsureOAuthSQLiteDirectoryAcceptsWritableNonPrivatePath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory permissions are not available on Windows")
+	}
+	// Owned temp dirs allow chmod, so this exercises the happy path where the
+	// directory ends private. Writability fallback is covered by the EPERM
+	// production path; isPermissionError is unit-tested separately.
+	directory := t.TempDir()
+	if err := ensureOAuthSQLiteDirectory(directory); err != nil {
+		t.Fatalf("ensureOAuthSQLiteDirectory: %v", err)
+	}
+	info, err := os.Stat(directory)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("expected private directory, got %o", info.Mode().Perm())
+	}
+}
+
+func TestIsPermissionError(t *testing.T) {
+	t.Parallel()
+	if !isPermissionError(os.ErrPermission) {
+		t.Fatal("os.ErrPermission should match")
+	}
+	if isPermissionError(errors.New("other")) {
+		t.Fatal("generic error should not match")
+	}
+	if isPermissionError(nil) {
+		t.Fatal("nil should not match")
+	}
+}
+
+func TestAssertWritableDirectory(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if err := assertWritableDirectory(dir); err != nil {
+		t.Fatalf("writable temp dir: %v", err)
+	}
+	missing := filepath.Join(dir, "missing-subdir")
+	if err := assertWritableDirectory(missing); err == nil {
+		t.Fatal("expected error for missing directory")
+	}
+}
+
 func assertPrivateSQLiteFiles(t *testing.T, path string) {
 	t.Helper()
 	directoryInfo, err := os.Stat(filepath.Dir(path))

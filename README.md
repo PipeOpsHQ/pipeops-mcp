@@ -90,8 +90,9 @@ Generate the bridge encryption key with `openssl rand -base64 32`. Mount a
 persistent volume at `/data` when using SQLite so OAuth connections survive
 container replacement. Use Redis only when multiple MCP replicas need shared
 state. The mounted directory must be writable by UID/GID `65532`; the server
-keeps `/data/oauth` private with mode `0700` and its database files at mode
-`0600`. Do not set a shared `PIPEOPS_TOKEN` on the hosted service; each customer
+prefers `/data/oauth` private with mode `0700` and database files at mode
+`0600`, but continues when volume mounts reject `chmod` as long as the path is
+writable. Do not set a shared `PIPEOPS_TOKEN` on the hosted service; each customer
 authorizes their own PipeOps Console session.
 
 ## Usage

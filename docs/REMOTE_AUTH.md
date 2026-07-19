@@ -43,8 +43,12 @@ SQLite is the default and needs no separate database service. Mount a persistent
 volume at `/data` so registrations and OAuth sessions survive container
 replacement. Run one MCP replica in SQLite mode; do not put the SQLite file on
 a shared network filesystem. The mounted directory must be writable by the
-container user (UID/GID `65532`). The server requires `/data/oauth` to have mode
-`0700`; the database and its WAL/shared-memory files use mode `0600`.
+container user (UID/GID `65532`). Prefer mode `0700` on `/data/oauth` and
+`0600` on the database/WAL files; the server applies those modes when the
+filesystem allows. Some PVC/CSI mount points reject `chmod` — startup still
+succeeds when the path is writable (OAuth material is encrypted at rest with
+`PIPEOPS_OAUTH_ENCRYPTION_KEY`). On Kubernetes, set `fsGroup: 65532` (and
+optionally mount the volume at `/data`) so the nonroot user can create files.
 
 For multiple MCP replicas, use shared Redis 6.2 or newer instead:
 

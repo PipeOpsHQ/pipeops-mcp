@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -36,27 +37,16 @@ func newSQLiteOAuthStore(ctx context.Context, path string) (*sqliteOAuthStore, e
 		return nil, fmt.Errorf("resolve OAuth SQLite path: %w", err)
 	}
 	directory := filepath.Dir(absolutePath)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return nil, fmt.Errorf("create OAuth SQLite directory: %w", err)
-	}
-	if err := os.Chmod(directory, 0o700); err != nil {
-		return nil, fmt.Errorf("secure OAuth SQLite directory permissions: %w", err)
-	}
-	directoryInfo, err := os.Stat(directory)
-	if err != nil {
-		return nil, fmt.Errorf("inspect OAuth SQLite directory: %w", err)
-	}
-	if !directoryInfo.IsDir() {
-		return nil, fmt.Errorf("OAuth SQLite directory %q is not a directory", directory)
-	}
-	if runtime.GOOS != "windows" && directoryInfo.Mode().Perm()&0o077 != 0 {
-		return nil, fmt.Errorf("OAuth SQLite directory %q must be private (mode 0700)", directory)
+	if err := ensureOAuthSQLiteDirectory(directory); err != nil {
+		return nil, err
 	}
 	file, err := os.OpenFile(absolutePath, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("create OAuth SQLite database: %w", err)
 	}
-	if err := file.Chmod(0o600); err != nil {
+	// Best-effort: PVC/CSI mount points and some container security policies
+	// reject chmod even when the process can create and write the database.
+	if err := os.Chmod(absolutePath, 0o600); err != nil && !isPermissionError(err) {
 		_ = file.Close()
 		return nil, fmt.Errorf("secure OAuth SQLite database permissions: %w", err)
 	}
@@ -268,6 +258,73 @@ ON CONFLICT(key) DO UPDATE SET value = excluded.value, expires_at = excluded.exp
 func (s *sqliteOAuthStore) cleanupExpired(ctx context.Context, executor sqliteOAuthExecutor) error {
 	if _, err := executor.ExecContext(ctx, `DELETE FROM oauth_records WHERE expires_at <= ?`, s.now().UnixMilli()); err != nil {
 		return fmt.Errorf("clean expired OAuth records: %w", err)
+	}
+	return nil
+}
+
+// ensureOAuthSQLiteDirectory creates the OAuth data directory and tightens
+// permissions to 0700 when the platform allows it. Kubernetes volume mount
+// roots often return EPERM on chmod even when the container can write; in that
+// case we accept a non-private mode only if the directory is writable by the
+// process (tokens are still encrypted at rest when encryption is configured).
+func ensureOAuthSQLiteDirectory(directory string) error {
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return fmt.Errorf("create OAuth SQLite directory: %w", err)
+	}
+	chmodErr := os.Chmod(directory, 0o700)
+
+	directoryInfo, err := os.Stat(directory)
+	if err != nil {
+		return fmt.Errorf("inspect OAuth SQLite directory: %w", err)
+	}
+	if !directoryInfo.IsDir() {
+		return fmt.Errorf("OAuth SQLite directory %q is not a directory", directory)
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+
+	perm := directoryInfo.Mode().Perm()
+	if perm&0o077 == 0 {
+		return nil
+	}
+	// Directory is group/other accessible. Fail hard only when chmod failed for
+	// a reason other than platform denial, or when the path is not writable.
+	if chmodErr != nil && !isPermissionError(chmodErr) {
+		return fmt.Errorf("secure OAuth SQLite directory permissions: %w", chmodErr)
+	}
+	if err := assertWritableDirectory(directory); err != nil {
+		if chmodErr != nil {
+			return fmt.Errorf("secure OAuth SQLite directory permissions: %w (directory also not writable: %v)", chmodErr, err)
+		}
+		return fmt.Errorf("OAuth SQLite directory %q must be private (mode 0700) or writable by the process: %w", directory, err)
+	}
+	// chmod not permitted (common on volume mounts) but directory is usable.
+	return nil
+}
+
+func isPermissionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	return errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES)
+}
+
+func assertWritableDirectory(directory string) error {
+	probe, err := os.CreateTemp(directory, ".oauth-write-check-*")
+	if err != nil {
+		return err
+	}
+	name := probe.Name()
+	if err := probe.Close(); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	if err := os.Remove(name); err != nil {
+		return err
 	}
 	return nil
 }
