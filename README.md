@@ -77,7 +77,7 @@ Hosted transport configuration:
 - `PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp` sets the OAuth resource URL
 - `PIPEOPS_OAUTH_MODE=bearer|bridge|external` selects the hosted authentication mode
 - `PIPEOPS_OAUTH_STORE=sqlite|redis` selects bridge persistence (defaults to `sqlite`)
-- `PIPEOPS_OAUTH_SQLITE_PATH=/data/oauth/pipeops-mcp-oauth.db` sets the SQLite file used by a single MCP replica
+- `PIPEOPS_OAUTH_SQLITE_PATH` sets the SQLite file (default `/home/nonroot/.pipeops-mcp/oauth/pipeops-mcp-oauth.db`; use `/data/oauth/...` with a writable PVC for multi-restart durability)
 - `PIPEOPS_OAUTH_REDIS_URL` is required only when `PIPEOPS_OAUTH_STORE=redis`
 - `PIPEOPS_OAUTH_ENCRYPTION_KEY` is required in `bridge` mode and must be a base64-encoded 32-byte key
 - `PIPEOPS_OAUTH_ISSUER` optionally overrides the bridge issuer and is required in `external` mode
@@ -86,15 +86,14 @@ Hosted transport configuration:
 - `PIPEOPS_CONSOLE_OAUTH_CLIENT_ID` optionally overrides the Console public OAuth client (defaults to `pipeops_public_client`)
 - `PIPEOPS_CONSOLE_OAUTH_SCOPES` optionally overrides the Console scopes (defaults to `openid,profile,email`)
 
-Generate the bridge encryption key with `openssl rand -base64 32`. Mount a
-persistent volume at `/data` when using SQLite so OAuth connections survive
-container replacement. Use Redis only when multiple MCP replicas need shared
-state. The mounted directory must be writable by UID/GID `65532`; the server
-prefers `/data/oauth` private with mode `0700` and database files at mode
-`0600`. If `/data` is not writable (root-owned PVC without `fsGroup: 65532`),
-it falls back to a path under `$TMPDIR` so the process still starts (sessions
-may not survive restarts). Do not set a shared `PIPEOPS_TOKEN` on the hosted
-service; each customer authorizes their own PipeOps Console session.
+Generate the bridge encryption key with `openssl rand -base64 32`. The image
+pre-creates `/home/nonroot/.pipeops-mcp/oauth` (default SQLite path) and
+`/data/oauth` owned by UID/GID `65532`. Use the home path by default so a PVC
+mounted over `/data` cannot break startup. For durable SQLite across restarts,
+mount a volume writable by `65532` (`fsGroup: 65532`) and set
+`PIPEOPS_OAUTH_SQLITE_PATH=/data/oauth/pipeops-mcp-oauth.db`. Use Redis when
+multiple MCP replicas need shared state. Do not set a shared `PIPEOPS_TOKEN` on
+the hosted service; each customer authorizes their own PipeOps Console session.
 
 ## Usage
 
