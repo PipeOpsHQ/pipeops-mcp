@@ -73,6 +73,8 @@ func TestHandleToolsList(t *testing.T) {
 		"search_project_deployments",
 		"get_project_env_variables",
 		"update_project_env_variables",
+		"update_project_deploy_settings",
+		"update_project_security_policy",
 		"deploy_project_from_image",
 		"create_external_registry",
 		"list_external_registries",
