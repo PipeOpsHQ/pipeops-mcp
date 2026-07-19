@@ -151,6 +151,8 @@ pipeops-mcp-server
 - `get_project_logs` - Retrieve project logs
 - `get_project_env_variables` - Retrieve project environment variables
 - `update_project_env_variables` - Update project environment variables
+- `update_project_deploy_settings` - Update deploy/source-control settings (prefer-client thin body)
+- `update_project_security_policy` - Update image-scan security policy (prefer-client partial update)
 - `deploy_project_from_image` - Create and deploy a project from a pre-built container image
 
 ### BYOI & Registries

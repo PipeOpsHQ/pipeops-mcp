@@ -418,6 +418,45 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
+				Name: "update_project_deploy_settings",
+				Description: "Update project deploy/source-control settings (prefer-client). " +
+					"Only project_id is required; omit branch/repository/username/auto flags to keep " +
+					"stored values. Client-provided fields always win. Triggers a settings deployment " +
+					"(rebuild only if source fields change).",
+				InputSchema: objectSchema(map[string]interface{}{
+					"project_id":          stringProperty("The project ID or UUID"),
+					"workspace_id":        stringProperty("Optional workspace ID or UUID"),
+					"branch":              stringProperty("Git branch (omitted = keep current)"),
+					"repository":          stringProperty("Repository name/path (omitted = keep current)"),
+					"username":            stringProperty("VCS owner/username (omitted = keep current)"),
+					"auto_deploy_enabled": booleanProperty("Enable auto-deploy on push (omitted = keep current)"),
+					"auto_rollback":       booleanProperty("Enable auto-rollback (omitted = keep current)"),
+				}, "project_id"),
+			},
+			handler: s.updateProjectDeploySettingsTool,
+		},
+		{
+			tool: Tool{
+				Name: "update_project_security_policy",
+				Description: "Update project image-scan security policy (prefer-client partial update). " +
+					"Only send fields to change; omitted thresholds keep stored values. " +
+					"Explicit zeros (e.g. max_critical=0) are applied when provided.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"project_id":      stringProperty("The project ID or UUID"),
+					"workspace_id":    stringProperty("Optional workspace ID or UUID"),
+					"enabled":         booleanProperty("Enable image-scan gate (omitted = keep current)"),
+					"max_critical":    integerProperty("Max critical vulns allowed (omitted = keep; 0 when sent is intentional)"),
+					"max_high":        integerProperty("Max high vulns allowed"),
+					"max_medium":      integerProperty("Max medium vulns allowed"),
+					"max_cvss_score":  numberProperty("Max CVSS score allowed"),
+					"max_total_vulns": integerProperty("Max total vulns allowed"),
+					"fail_on_secrets": booleanProperty("Fail when secrets are detected"),
+				}, "project_id"),
+			},
+			handler: s.updateProjectSecurityPolicyTool,
+		},
+		{
+			tool: Tool{
 				Name:        "list_vcs_organizations",
 				Description: "List linked VCS organizations or personal profiles for a provider",
 				InputSchema: objectSchema(map[string]interface{}{
@@ -2472,10 +2511,32 @@ type searchProjectDeploymentsArgs struct {
 }
 
 type projectEnvVariablesArgs struct {
-	ProjectID     string                `json:"project_id"`
-	EnvVariables  []pipeops.EnvVariable `json:"env_variables"`
-	Merge         *bool                 `json:"merge,omitempty"`
-	WorkspaceID   string                `json:"workspace_id,omitempty"`
+	ProjectID    string                `json:"project_id"`
+	EnvVariables []pipeops.EnvVariable `json:"env_variables"`
+	Merge        *bool                 `json:"merge,omitempty"`
+	WorkspaceID  string                `json:"workspace_id,omitempty"`
+}
+
+type projectDeploySettingsArgs struct {
+	ProjectID         string `json:"project_id"`
+	WorkspaceID       string `json:"workspace_id,omitempty"`
+	Branch            string `json:"branch,omitempty"`
+	Repository        string `json:"repository,omitempty"`
+	Username          string `json:"username,omitempty"`
+	AutoDeployEnabled *bool  `json:"auto_deploy_enabled,omitempty"`
+	AutoRollback      *bool  `json:"auto_rollback,omitempty"`
+}
+
+type projectSecurityPolicyArgs struct {
+	ProjectID     string   `json:"project_id"`
+	WorkspaceID   string   `json:"workspace_id,omitempty"`
+	Enabled       *bool    `json:"enabled,omitempty"`
+	MaxCritical   *int     `json:"max_critical,omitempty"`
+	MaxHigh       *int     `json:"max_high,omitempty"`
+	MaxMedium     *int     `json:"max_medium,omitempty"`
+	MaxCvssScore  *float64 `json:"max_cvss_score,omitempty"`
+	MaxTotalVulns *int     `json:"max_total_vulns,omitempty"`
+	FailOnSecrets *bool    `json:"fail_on_secrets,omitempty"`
 }
 
 type listEnvironmentsArgs struct {
@@ -4619,6 +4680,82 @@ func (s *Server) updateProjectEnvVariablesTool(ctx context.Context, args map[str
 	resp, _, err := s.client.Projects.UpdateEnvVariables(ctx, request.ProjectID, &pipeops.EnvVariablesRequest{
 		EnvVariables:  request.EnvVariables,
 		Merge:         merge,
+		WorkspaceUUID: workspaceUUID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) updateProjectDeploySettingsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var request projectDeploySettingsArgs
+	if err := decodeArguments(args, &request); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(request.ProjectID) == "" {
+		return nil, fmt.Errorf("project_id is required")
+	}
+
+	var workspaceUUID string
+	if request.WorkspaceID != "" {
+		ws, err := s.resolveWorkspaceUUID(ctx, request.WorkspaceID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace: %w", err)
+		}
+		workspaceUUID = ws
+	} else {
+		ws, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+		if err == nil {
+			workspaceUUID = ws
+		}
+	}
+
+	resp, _, err := s.client.Projects.UpdateDeploySettings(ctx, request.ProjectID, &pipeops.DeploySettingsRequest{
+		AutoDeployEnabled: request.AutoDeployEnabled,
+		Branch:            request.Branch,
+		AutoRollback:      request.AutoRollback,
+		UserName:          request.Username,
+		Repository:        request.Repository,
+		WorkspaceUUID:     workspaceUUID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) updateProjectSecurityPolicyTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var request projectSecurityPolicyArgs
+	if err := decodeArguments(args, &request); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(request.ProjectID) == "" {
+		return nil, fmt.Errorf("project_id is required")
+	}
+
+	var workspaceUUID string
+	if request.WorkspaceID != "" {
+		ws, err := s.resolveWorkspaceUUID(ctx, request.WorkspaceID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace: %w", err)
+		}
+		workspaceUUID = ws
+	} else {
+		ws, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+		if err == nil {
+			workspaceUUID = ws
+		}
+	}
+
+	resp, _, err := s.client.Projects.UpdateSecurityPolicy(ctx, request.ProjectID, &pipeops.SecurityPolicyRequest{
+		Enabled:       request.Enabled,
+		MaxCritical:   request.MaxCritical,
+		MaxHigh:       request.MaxHigh,
+		MaxMedium:     request.MaxMedium,
+		MaxCvssScore:  request.MaxCvssScore,
+		MaxTotalVulns: request.MaxTotalVulns,
+		FailOnSecrets: request.FailOnSecrets,
 		WorkspaceUUID: workspaceUUID,
 	})
 	if err != nil {
