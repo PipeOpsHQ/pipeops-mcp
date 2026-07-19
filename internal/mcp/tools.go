@@ -44,9 +44,6 @@ type listGitOpsApplicationsArgs struct {
 	Limit int `json:"limit,omitempty"`
 }
 
-type gitOpsApplicationUUIDArgs struct {
-	ApplicationUUID string `json:"application_uuid"`
-}
 
 type createGitOpsApplicationArgs struct {
 	Name                string `json:"name"`
@@ -96,10 +93,6 @@ type listProjectGroupsArgs struct {
 	Offset      int    `json:"offset,omitempty"`
 }
 
-type projectGroupUUIDArgs struct {
-	GroupUUID   string `json:"group_uuid"`
-	WorkspaceID string `json:"workspace_id,omitempty"`
-}
 
 type createProjectGroupArgs struct {
 	Name                   string `json:"name"`
