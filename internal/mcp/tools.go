@@ -154,8 +154,11 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
-				Name:        "deploy_project",
-				Description: "Trigger a deployment for a project",
+				Name: "deploy_project",
+				Description: "Trigger a deployment for an existing project (prefer-client: " +
+					"only project_id is required; the control plane fills build, source, network, " +
+					"and env from the stored project). Optional workspace_id scopes the call; " +
+					"no_cache forces a clean rebuild.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"project_id":   stringProperty("The project ID or UUID to deploy"),
 					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
