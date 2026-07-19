@@ -67,38 +67,45 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
-				Name:        "create_project",
-				Description: "Create a new project via POST /project/create (clusterUUID + environment_uuid contract)",
+				Name: "create_project",
+				Description: "Create and queue deploy of a project (POST /project/create). " +
+					"Matches the dashboard create contract. Prefer-client: any field you send is used as-is; " +
+					"only empty fields get defaults (workspace→first workspace, environment→development, " +
+					"source→github, PORT from port if env_vars lacks PORT, network protocol→HTTP, worker→false). " +
+					"Required for a standard git web app: name, username, source, repository, branch, " +
+					"cluster_uuid, environment_uuid, build_method (or build_settings), and port for web apps. " +
+					"Strongly recommended: commit_sha, commit_url, language (e.g. dockerfile|nodejs). " +
+					"Do not invent K8s secret names; runner creates {name}-{namespace}-secret automatically.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"name":             stringProperty("The project name"),
-					"username":         stringProperty("VCS username/org that owns the repository (e.g. github org or user)"),
-					"source":           stringProperty("Source provider: github | gitlab | bitbucket | image (default: github)"),
-					"repository":       stringProperty("Repository URL for the project source"),
-					"branch":           stringProperty("Repository branch to deploy"),
-					"cluster_uuid":     stringProperty("Cluster UUID that will host the project (preferred; maps to clusterUUID)"),
-					"clusterUUID":      stringProperty("Alias for cluster_uuid (controller JSON key)"),
-					"server_id":        stringProperty("Legacy alias for cluster_uuid (soft migration)"),
-					"environment_uuid": stringProperty("Environment UUID for the project"),
-					"environment_id":   stringProperty("Legacy alias for environment_uuid (soft migration)"),
-					"environment":      stringProperty("Environment name/slug (default: development)"),
-					"workspace_id":     stringProperty("Workspace UUID/ID (maps to workspace_uuid; defaults to first workspace if omitted)"),
-					"workspace_uuid":   stringProperty("Alias for workspace_id (controller JSON key)"),
-					"commit_url":       stringProperty("Optional commit URL"),
-					"commit_sha":       stringProperty("Optional commit SHA"),
-					"language":         stringProperty("Optional repository language (maps to repositoryLanguage)"),
-					"framework":        stringProperty("Optional framework name"),
-					"build_method":     stringProperty("Optional build method (e.g. nodejs, docker, go)"),
-					"build_command":    stringProperty("Optional build command"),
-					"run_command":      stringProperty("Optional run/start command"),
+					"name":             stringProperty("Project name (K8s-safe; spaces become dashes server-side)"),
+					"username":         stringProperty("VCS username/org that owns the repository (required for git)"),
+					"source":           stringProperty("VCS provider: github | gitlab | bitbucket | image. Default github if omitted"),
+					"repository":       stringProperty("Full repository URL"),
+					"branch":           stringProperty("Git branch to deploy"),
+					"cluster_uuid":     stringProperty("Target cluster/server UUID (maps to clusterUUID)"),
+					"clusterUUID":      stringProperty("Alias for cluster_uuid"),
+					"server_id":        stringProperty("Legacy alias for cluster_uuid"),
+					"environment_uuid": stringProperty("Environment UUID (controller resolves namespace from this)"),
+					"environment_id":   stringProperty("Legacy alias for environment_uuid"),
+					"environment":      stringProperty("Environment name/slug for display. Default development if omitted"),
+					"workspace_id":     stringProperty("Workspace UUID/ID. Default: first workspace if omitted"),
+					"workspace_uuid":   stringProperty("Alias for workspace_id (body workspace_uuid)"),
+					"commit_url":       stringProperty("Commit URL (dashboard sends real commit link; default repository URL if empty)"),
+					"commit_sha":       stringProperty("Commit SHA to build (prefer real SHA from list_vcs_branches / git)"),
+					"language":         stringProperty("repositoryLanguage, e.g. nodejs, go, dockerfile"),
+					"framework":        stringProperty("Optional framework label"),
+					"build_method":     stringProperty("buildSettings.buildMethod, e.g. nodejs, docker, go"),
+					"build_command":    stringProperty("buildSettings.buildCommand"),
+					"run_command":      stringProperty("buildSettings.runCommand (process start)"),
 					"start_command":    stringProperty("Legacy alias for run_command"),
-					"port":             integerProperty("Optional application port (maps to networkSettings)"),
-					"protocol":         stringProperty("Optional network protocol for port (default: HTTP)"),
-					"env_vars":         objectProperty("Optional environment variables as key→value map (maps to envVariables[])", true),
+					"port":             integerProperty("App port → networkSettings[].Port; also seeds PORT env if env_vars has no PORT"),
+					"protocol":         stringProperty("Network protocol (default HTTP if port set and protocol omitted)"),
+					"env_vars":         objectProperty("Environment variables map. Client values win; PORT only added if missing and port is set", true),
 					// Nested object MUST use properties (not additionalProperties). Passing a
 					// property map as additionalProperties breaks JSON Schema draft 2020-12
 					// (Claude rejects it): the nested key "type" collides with the schema keyword.
 					"build_settings": nestedObjectProperty(
-						"Optional nested buildSettings object (build_method, build_command, run_command, worker, type, …)",
+						"Nested buildSettings. Explicit fields override top-level build_method/build_command/run_command when both are set in handler merge order",
 						map[string]interface{}{
 							"type":             stringProperty("Build settings type (e.g. user)"),
 							"build_method":     stringProperty("Build method (e.g. nodejs, docker)"),
@@ -107,7 +114,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 							"buildCommand":     stringProperty("Alias for build_command"),
 							"run_command":      stringProperty("Run/start command"),
 							"runCommand":       stringProperty("Alias for run_command"),
-							"worker":           booleanProperty("Whether this is a worker project"),
+							"worker":           booleanProperty("Worker project (default false if omitted)"),
 							"build_path":       stringProperty("Build path"),
 							"build_directory":  stringProperty("Build directory"),
 							"build_version":    stringProperty("Build version / runtime image tag"),
@@ -3400,10 +3407,8 @@ func (s *Server) createProjectTool(ctx context.Context, args map[string]interfac
 		return nil, fmt.Errorf("environment_uuid is required (environment_id is accepted as a legacy alias)")
 	}
 
+	// Prefer client-supplied environment; SDK ApplyCreateProjectDefaults fills "development" if empty.
 	environment := optionalStringArg(args, "environment")
-	if environment == "" {
-		environment = "development"
-	}
 
 	// workspace_uuid is required by POST /project/create — never omit.
 	// Resolve from workspace_id / workspace_uuid args, else first workspace.
@@ -3428,32 +3433,25 @@ func (s *Server) createProjectTool(ctx context.Context, args map[string]interfac
 		RunCommand:   runCommand,
 	}
 	if nested, ok := args["build_settings"].(map[string]interface{}); ok && nested != nil {
+		// Nested object fields override top-level build_* when set (client explicit wins).
 		mergeCreateProjectBuildSettings(&buildSettings, nested)
-	}
-
-	// Worker defaults to false when build settings are present (controller contract).
-	worker := false
-	if buildSettings.Worker == nil {
-		buildSettings.Worker = &worker
 	}
 
 	var networkSettings []pipeops.CreateProjectNetworkSetting
 	if port, ok := optionalInt32Arg(args, "port"); ok && port > 0 {
-		protocol := optionalStringArg(args, "protocol")
-		if protocol == "" {
-			protocol = "HTTP"
-		}
+		// Protocol default applied by ApplyCreateProjectDefaults if empty.
 		networkSettings = []pipeops.CreateProjectNetworkSetting{
-			{Port: port, Protocol: protocol},
+			{Port: port, Protocol: optionalStringArg(args, "protocol")},
 		}
 	}
 
+	// Client env_vars win; SDK injects PORT only if missing and network port is set.
 	envVariables := createProjectEnvVarsFromArgs(args)
 
 	req := &pipeops.CreateProjectRequest{
 		Name:               name,
 		Username:           username,
-		Source:             source,
+		Source:             source, // empty → github via ApplyCreateProjectDefaults
 		Repository:         repository,
 		Branch:             branch,
 		ClusterUUID:        clusterUUID,
@@ -3477,6 +3475,7 @@ func (s *Server) createProjectTool(ctx context.Context, args map[string]interfac
 		ProjectType:        firstNonEmptyString(optionalStringArg(args, "project_type"), optionalStringArg(args, "projectType")),
 	}
 
+	// Create applies prefer-client defaults (PORT, worker, protocol, source, environment, …).
 	resp, _, err := s.client.Projects.Create(ctx, req)
 	if err != nil {
 		return nil, err
