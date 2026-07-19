@@ -9,7 +9,7 @@ import (
 	"github.com/PipeOpsHQ/pipeops-go-sdk/pipeops"
 )
 
-func TestDeployProjectToolUsesWorkspaceScopedRedeployContract(t *testing.T) {
+func TestDeployProjectToolUsesWorkspaceScopedThinRedeploy(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -30,66 +30,31 @@ func TestDeployProjectToolUsesWorkspaceScopedRedeployContract(t *testing.T) {
 				t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
 			}
 
-			switch requests {
-			case 1:
-				if r.Method != http.MethodGet || r.URL.Path != "/project/fetch/"+projectUUID {
-					t.Fatalf("fetch request = %s %s, want GET /project/fetch/%s", r.Method, r.URL.Path, projectUUID)
-				}
-				return jsonHTTPResponse(r, http.StatusOK, `{
-					"success": true,
-					"data": {
-						"project": {
-							"Name": "ora-landing",
-							"BuildMethod": "railpack",
-							"Configuration": {"settings": {}}
-						},
-						"deployment": {"CommitSha": "abc123"}
-					}
-				}`), nil
-			case 2:
-				if r.Method != http.MethodGet || r.URL.Path != "/project/settings/network/"+projectUUID {
-					t.Fatalf("network request = %s %s, want GET /project/settings/network/%s", r.Method, r.URL.Path, projectUUID)
-				}
-				return jsonHTTPResponse(r, http.StatusOK, `{
-					"success": true,
-					"data": [{
-						"UUID": "network-1",
-						"Port": 3000,
-						"Protocol": "HTTP",
-						"AutoHTTPS": true,
-						"Public": true
-					}]
-				}`), nil
-			case 3:
-				if r.Method != http.MethodPost || r.URL.Path != "/project/redeploy/"+projectUUID {
-					t.Fatalf("redeploy request = %s %s, want POST /project/redeploy/%s", r.Method, r.URL.Path, projectUUID)
-				}
-				if got := r.URL.Query().Get("action"); got != "deploy" {
-					t.Fatalf("action = %q, want deploy", got)
-				}
-				if got := r.URL.Query().Get("no_cache"); got != "true" {
-					t.Fatalf("no_cache = %q, want true", got)
-				}
-
-				var payload map[string]interface{}
-				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-					t.Fatalf("decode redeploy payload: %v", err)
-				}
-				if got := payload["workspace_uuid"]; got != workspaceUUID {
-					t.Fatalf("payload workspace_uuid = %v, want %q", got, workspaceUUID)
-				}
-				if got := payload["name"]; got != "ora-landing" {
-					t.Fatalf("payload name = %v, want ora-landing", got)
-				}
-				networkSettings, ok := payload["networkSettings"].([]interface{})
-				if !ok || len(networkSettings) != 1 {
-					t.Fatalf("payload networkSettings = %#v, want one item", payload["networkSettings"])
-				}
-				return jsonHTTPResponse(r, http.StatusAccepted, `{"success":true,"message":"Deployment queued"}`), nil
-			default:
-				t.Fatalf("unexpected request %d: %s %s", requests, r.Method, r.URL.String())
-				return nil, nil
+			// Prefer-client: single POST with thin body (no project fetch / network snapshot).
+			if r.Method != http.MethodPost || r.URL.Path != "/project/redeploy/"+projectUUID {
+				t.Fatalf("redeploy request = %s %s, want POST /project/redeploy/%s", r.Method, r.URL.Path, projectUUID)
 			}
+			if got := r.URL.Query().Get("action"); got != "deploy" {
+				t.Fatalf("action = %q, want deploy", got)
+			}
+			if got := r.URL.Query().Get("no_cache"); got != "true" {
+				t.Fatalf("no_cache = %q, want true", got)
+			}
+
+			var payload map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatalf("decode redeploy payload: %v", err)
+			}
+			if got := payload["workspace_uuid"]; got != workspaceUUID {
+				t.Fatalf("payload workspace_uuid = %v, want %q", got, workspaceUUID)
+			}
+			if _, ok := payload["name"]; ok {
+				t.Fatalf("thin redeploy should omit name, got %#v", payload["name"])
+			}
+			if _, ok := payload["networkSettings"]; ok {
+				t.Fatalf("thin redeploy should omit networkSettings, got %#v", payload["networkSettings"])
+			}
+			return jsonHTTPResponse(r, http.StatusAccepted, `{"success":true,"message":"Deployment queued"}`), nil
 		}),
 	})
 
@@ -102,8 +67,8 @@ func TestDeployProjectToolUsesWorkspaceScopedRedeployContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deployProjectTool error: %v", err)
 	}
-	if requests != 3 {
-		t.Fatalf("requests = %d, want 3", requests)
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 (prefer-client thin redeploy)", requests)
 	}
 
 	resultMap, ok := result.(map[string]interface{})
