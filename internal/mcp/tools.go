@@ -402,11 +402,16 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
-				Name:        "update_project_env_variables",
-				Description: "Update environment variables for a project",
+				Name: "update_project_env_variables",
+				Description: "Update project environment variables (prefer-client). " +
+					"By default merge=true so keys overlay existing envs without wiping others; " +
+					"set merge=false for full replace (dashboard-style). Control plane injects PORT " +
+					"from network when missing.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"project_id":    stringProperty("The project ID or UUID"),
-					"env_variables": envVariablesProperty("Environment variables to set"),
+					"env_variables": envVariablesProperty("Environment variables to set (client values win)"),
+					"merge":         booleanProperty("When true (default), merge into existing envs; false = full replace"),
+					"workspace_id":  stringProperty("Optional workspace ID or UUID"),
 				}, "project_id", "env_variables"),
 			},
 			handler: s.updateProjectEnvVariablesTool,
@@ -2463,8 +2468,10 @@ type searchProjectDeploymentsArgs struct {
 }
 
 type projectEnvVariablesArgs struct {
-	ProjectID    string                `json:"project_id"`
-	EnvVariables []pipeops.EnvVariable `json:"env_variables"`
+	ProjectID     string                `json:"project_id"`
+	EnvVariables  []pipeops.EnvVariable `json:"env_variables"`
+	Merge         *bool                 `json:"merge,omitempty"`
+	WorkspaceID   string                `json:"workspace_id,omitempty"`
 }
 
 type listEnvironmentsArgs struct {
@@ -4588,8 +4595,25 @@ func (s *Server) updateProjectEnvVariablesTool(ctx context.Context, args map[str
 		return nil, fmt.Errorf("project_id is required")
 	}
 
+	// Prefer-client default: merge so agents can set keys without wiping the full set.
+	merge := true
+	if request.Merge != nil {
+		merge = *request.Merge
+	}
+
+	var workspaceUUID string
+	if request.WorkspaceID != "" {
+		ws, err := s.resolveWorkspaceUUID(ctx, request.WorkspaceID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace: %w", err)
+		}
+		workspaceUUID = ws
+	}
+
 	resp, _, err := s.client.Projects.UpdateEnvVariables(ctx, request.ProjectID, &pipeops.EnvVariablesRequest{
-		EnvVariables: request.EnvVariables,
+		EnvVariables:  request.EnvVariables,
+		Merge:         merge,
+		WorkspaceUUID: workspaceUUID,
 	})
 	if err != nil {
 		return nil, err
