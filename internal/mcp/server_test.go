@@ -453,8 +453,14 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		t.Fatal("Expected deploy_addon required schema to be []string")
 	}
 
-	if len(deployAddonRequired) != 1 || deployAddonRequired[0] != "addon_id" {
-		t.Fatalf("Expected deploy_addon to require only addon_id, got %v", deployAddonRequired)
+	deployAddonRequiredFields := make(map[string]bool)
+	for _, field := range deployAddonRequired {
+		deployAddonRequiredFields[field] = true
+	}
+	for _, field := range []string{"addon_id", "server_id"} {
+		if !deployAddonRequiredFields[field] {
+			t.Errorf("Expected deploy_addon to require %s, got %v", field, deployAddonRequired)
+		}
 	}
 
 	addAddonDomain := toolByName["add_addon_domain"]
@@ -1093,6 +1099,9 @@ func TestDeployAddOnToolFallsBackToFirstWorkspace(t *testing.T) {
 				if got := payload["Workspace"]; got != "ws_default" {
 					t.Fatalf("Workspace = %#v, want %q", got, "ws_default")
 				}
+				if got := payload["Server"]; got != "cluster-1" {
+					t.Fatalf("Server = %#v, want %q", got, "cluster-1")
+				}
 				return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","data":{"deployment":{"UID":"dep_1"}}}`), nil
 			default:
 				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
@@ -1102,7 +1111,10 @@ func TestDeployAddOnToolFallsBackToFirstWorkspace(t *testing.T) {
 	})
 
 	server := &Server{client: client}
-	result, err := server.deployAddOnTool(context.Background(), map[string]interface{}{"addon_id": "addon_123"})
+	result, err := server.deployAddOnTool(context.Background(), map[string]interface{}{
+		"addon_id":  "addon_123",
+		"server_id": "cluster-1",
+	})
 	if err != nil {
 		t.Fatalf("deployAddOnTool error: %v", err)
 	}
@@ -1351,7 +1363,11 @@ func TestDeployAddOnToolResolvesExplicitWorkspaceIDToUUID(t *testing.T) {
 	})
 
 	server := &Server{client: client}
-	result, err := server.deployAddOnTool(context.Background(), map[string]interface{}{"workspace_id": "1", "addon_id": "addon_123"})
+	result, err := server.deployAddOnTool(context.Background(), map[string]interface{}{
+		"workspace_id": "1",
+		"addon_id":     "addon_123",
+		"server_id":    "cluster-1",
+	})
 	if err != nil {
 		t.Fatalf("deployAddOnTool error: %v", err)
 	}

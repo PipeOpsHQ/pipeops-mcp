@@ -965,15 +965,19 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
-				Name:        "deploy_addon",
-				Description: "Deploy an add-on to a project or server",
+				Name: "deploy_addon",
+				Description: "Deploy a marketplace add-on (prefer-client: only addon_id + server_id required; " +
+					"control plane fills Config from catalog, environment from cluster defaults when omitted). " +
+					"Optional config overlays catalog defaults without wiping them.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"addon_id":     stringProperty("The add-on ID or UUID to deploy"),
-					"project_id":   stringProperty("Optional project ID to attach the deployment to"),
-					"server_id":    stringProperty("Optional server ID to attach the deployment to"),
-					"workspace_id": stringProperty("Optional workspace ID to scope the deployment; defaults to the first available workspace"),
-					"config":       objectProperty("Optional deployment configuration", true),
-				}, "addon_id"),
+					"addon_id":       stringProperty("The add-on marketplace UID to deploy"),
+					"server_id":      stringProperty("Cluster/server UUID to deploy onto"),
+					"workspace_id":   stringProperty("Optional workspace UUID; defaults to the first available workspace"),
+					"environment_id": stringProperty("Optional environment UUID; defaults to first env on the cluster"),
+					"project_id":     stringProperty("Optional project ID (placement hint)"),
+					"tag":            stringProperty("Optional version/tag override"),
+					"config":         objectProperty("Optional partial deployment configuration (merged over catalog)", true),
+				}, "addon_id", "server_id"),
 			},
 			handler: s.deployAddOnTool,
 		},
@@ -2525,11 +2529,13 @@ type updateTeamMemberRoleArgs struct {
 }
 
 type deployAddOnArgs struct {
-	AddOnID     string                 `json:"addon_id"`
-	ProjectID   string                 `json:"project_id,omitempty"`
-	ServerID    string                 `json:"server_id,omitempty"`
-	WorkspaceID string                 `json:"workspace_id,omitempty"`
-	Config      map[string]interface{} `json:"config,omitempty"`
+	AddOnID       string                 `json:"addon_id"`
+	ProjectID     string                 `json:"project_id,omitempty"`
+	ServerID      string                 `json:"server_id,omitempty"`
+	WorkspaceID   string                 `json:"workspace_id,omitempty"`
+	EnvironmentID string                 `json:"environment_id,omitempty"`
+	Tag           string                 `json:"tag,omitempty"`
+	Config        map[string]interface{} `json:"config,omitempty"`
 }
 
 type addOnDeploymentArgs struct {
@@ -5825,6 +5831,9 @@ func (s *Server) deployAddOnTool(ctx context.Context, args map[string]interface{
 	if req.AddOnID == "" {
 		return nil, fmt.Errorf("addon_id is required")
 	}
+	if strings.TrimSpace(req.ServerID) == "" {
+		return nil, fmt.Errorf("server_id is required")
+	}
 
 	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
 	if err != nil {
@@ -5832,11 +5841,13 @@ func (s *Server) deployAddOnTool(ctx context.Context, args map[string]interface{
 	}
 
 	resp, _, err := s.client.AddOns.Deploy(ctx, &pipeops.DeployAddOnRequest{
-		ID:        req.AddOnID,
-		ProjectID: req.ProjectID,
-		Server:    req.ServerID,
-		Workspace: workspaceUUID,
-		Config:    req.Config,
+		ID:          req.AddOnID,
+		ProjectID:   req.ProjectID,
+		Server:      req.ServerID,
+		Workspace:   workspaceUUID,
+		Environment: req.EnvironmentID,
+		Tag:         req.Tag,
+		Config:      req.Config,
 	})
 	if err != nil {
 		return nil, err
