@@ -23,7 +23,9 @@ const (
 	defaultHTTPAddr        = ":8080"
 	defaultMaxBodySize     = int64(4 << 20)
 	defaultOAuthStore      = "sqlite"
-	defaultSQLitePath      = "/data/oauth/pipeops-mcp-oauth.db"
+	// Default lives under the distroless nonroot home so it works without a
+	// writable PVC. Mount a volume and set PIPEOPS_OAUTH_SQLITE_PATH for durability.
+	defaultSQLitePath = "/home/nonroot/.pipeops-mcp/oauth/pipeops-mcp-oauth.db"
 	defaultConsoleURL      = "https://console.pipeops.io"
 	defaultConsoleClientID = "pipeops_public_client"
 )

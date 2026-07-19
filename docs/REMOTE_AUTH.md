@@ -29,7 +29,7 @@ PIPEOPS_BASE_URL=https://api.pipeops.io
 PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp
 PIPEOPS_OAUTH_MODE=bridge
 PIPEOPS_OAUTH_STORE=sqlite
-PIPEOPS_OAUTH_SQLITE_PATH=/data/oauth/pipeops-mcp-oauth.db
+PIPEOPS_OAUTH_SQLITE_PATH=/home/nonroot/.pipeops-mcp/oauth/pipeops-mcp-oauth.db
 PIPEOPS_OAUTH_ENCRYPTION_KEY=BASE64_ENCODED_32_BYTE_KEY
 ```
 
@@ -39,27 +39,35 @@ Generate the encryption key once and store it in the deployment secret manager:
 openssl rand -base64 32
 ```
 
-SQLite is the default and needs no separate database service. Mount a persistent
-volume at `/data` so registrations and OAuth sessions survive container
-replacement. Run one MCP replica in SQLite mode; do not put the SQLite file on
-a shared network filesystem. The mounted directory must be writable by the
-container user (UID/GID `65532`). Prefer mode `0700` on `/data/oauth` and
-`0600` on the database/WAL files; the server applies those modes when the
-filesystem allows. Some PVC/CSI mount points reject `chmod` or are root-owned
-without write access for the nonroot user. In that case the server falls back
-to `$TMPDIR/pipeops-mcp-oauth/` (ephemeral — OAuth sessions may reset on
-restart) and logs a warning. For durable SQLite on Kubernetes:
+SQLite is the default and needs no separate database service. The container
+image pre-creates two directories owned by UID/GID `65532`:
+
+- `/home/nonroot/.pipeops-mcp/oauth` — **default** path (works without a volume)
+- `/data/oauth` — optional durable path when a PVC is mounted with `fsGroup`
+
+Run one MCP replica in SQLite mode; do not put the SQLite file on a shared
+network filesystem. Prefer mode `0700` on the directory and `0600` on the
+database/WAL files. If the configured path is not writable, the server falls
+back to `$TMPDIR/pipeops-mcp-oauth/` and logs a warning.
+
+For durable SQLite across pod restarts on Kubernetes, mount a volume and point
+the env var at it (do not mount over `/home/nonroot` unless the volume is
+writable by 65532):
 
 ```yaml
 securityContext:
   fsGroup: 65532
   runAsUser: 65532
   runAsGroup: 65532
+env:
+  - name: PIPEOPS_OAUTH_SQLITE_PATH
+    value: /data/oauth/pipeops-mcp-oauth.db
+volumeMounts:
+  - name: oauth-data
+    mountPath: /data
 ```
 
-Mount the volume at `/data` (or set `PIPEOPS_OAUTH_SQLITE_PATH` to a path the
-process can write). OAuth material is encrypted at rest with
-`PIPEOPS_OAUTH_ENCRYPTION_KEY`.
+OAuth material is encrypted at rest with `PIPEOPS_OAUTH_ENCRYPTION_KEY`.
 
 For multiple MCP replicas, use shared Redis 6.2 or newer instead:
 
