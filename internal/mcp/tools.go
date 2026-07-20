@@ -226,7 +226,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 					"name":             stringProperty("Project name (K8s-safe; spaces become dashes server-side)"),
 					"username":         stringProperty("VCS username/org that owns the repository (required for git)"),
 					"source":           stringProperty("VCS provider: github | gitlab | bitbucket | image. Default github if omitted"),
-					"repository":       stringProperty("Full repository URL"),
+					"repository":       stringProperty("Repo as owner/name (preferred) or full HTTPS URL (normalized server-side)"),
 					"branch":           stringProperty("Git branch to deploy"),
 					"cluster_uuid":     stringProperty("Target cluster/server UUID (maps to clusterUUID)"),
 					"clusterUUID":      stringProperty("Alias for cluster_uuid"),
@@ -269,7 +269,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 							"dockerImageURL":   stringProperty("Alias for docker_image_url"),
 						},
 					),
-				}, "name", "cluster_uuid", "environment_uuid", "repository", "branch", "source", "username"),
+				}, "name", "cluster_uuid", "environment_uuid", "repository", "branch", "source", "username", "port", "build_method"),
 			},
 			handler: s.createProjectTool,
 		},
@@ -4116,10 +4116,13 @@ func (s *Server) createProjectTool(ctx context.Context, args map[string]interfac
 
 	var networkSettings []pipeops.CreateProjectNetworkSetting
 	if port, ok := optionalInt32Arg(args, "port"); ok && port > 0 {
-		// Protocol default applied by ApplyCreateProjectDefaults if empty.
+		// Protocol/Public/AutoHTTPS defaults applied by SDK ApplyCreateProjectDefaults.
 		networkSettings = []pipeops.CreateProjectNetworkSetting{
 			{Port: port, Protocol: optionalStringArg(args, "protocol")},
 		}
+	} else if buildSettings.Worker == nil || !*buildSettings.Worker {
+		// Web apps need a network entry; controller rejects empty networkSettings.
+		return nil, fmt.Errorf("port is required for web apps (maps to networkSettings[].Port and PORT env)")
 	}
 
 	// Client env_vars win; SDK injects PORT only if missing and network port is set.
