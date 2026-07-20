@@ -379,7 +379,7 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		requiredFields[field] = true
 	}
 
-	for _, field := range []string{"name", "cluster_uuid", "environment_uuid", "repository", "branch", "source", "username"} {
+	for _, field := range []string{"name", "cluster_uuid", "environment_uuid", "repository", "branch", "source", "username", "port", "build_method"} {
 		if !requiredFields[field] {
 			t.Errorf("Expected create_project to require %s", field)
 		}
@@ -1606,6 +1606,8 @@ func TestCreateProjectToolAlwaysSendsWorkspaceUUID(t *testing.T) {
 		"branch":           "main",
 		"cluster_uuid":     "cluster-1",
 		"environment_uuid": "env-1",
+		"port":             8080,
+		"build_method":     "docker",
 	})
 	if err != nil {
 		t.Fatalf("createProjectTool default workspace error: %v", err)
