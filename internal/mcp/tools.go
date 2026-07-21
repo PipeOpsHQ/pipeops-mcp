@@ -4623,18 +4623,16 @@ func (s *Server) getProjectBuildLogsTool(ctx context.Context, args map[string]in
 		return nil, fmt.Errorf("project_id is required")
 	}
 
+	// Only pass workspace_uuid when the caller set it. Auto-picking the "first"
+	// workspace breaks build-logs on prod (403 HTML) when it does not match the
+	// project's workspace tenancy middleware.
 	var workspaceUUID string
-	if request.WorkspaceID != "" {
+	if strings.TrimSpace(request.WorkspaceID) != "" {
 		ws, err := s.resolveWorkspaceUUID(ctx, request.WorkspaceID)
 		if err != nil {
 			return nil, fmt.Errorf("resolve workspace: %w", err)
 		}
 		workspaceUUID = ws
-	} else {
-		ws, err := s.resolveDefaultWorkspaceUUID(ctx, args)
-		if err == nil {
-			workspaceUUID = ws
-		}
 	}
 
 	resp, _, err := s.client.Projects.GetBuildLogs(ctx, request.ProjectID, &pipeops.BuildLogsOptions{
