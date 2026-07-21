@@ -1,37 +1,31 @@
-# Binaries for programs and plugins
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
 
-# Test binary, built with `go test -c`
-*.test
-
-# Output of the go coverage tool
-*.out
-
-# Dependency directories
-vendor/
-
-# Go workspace file
-go.work
-
-# Build output
-/pipeops-mcp-server
-/cmd/pipeops-mcp-server/pipeops-mcp-server
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-# OS
 .DS_Store
-Thumbs.db
-
-# Environment variables
 .env
 .env.local
+.grok/
+.idea/
+.vscode/
+*.dll
+*.dylib
+*.exe
+*.exe~
+*.out
+*.so
+*.swo
+*.swp
+*.test
+*~
+/cmd/pipeops-mcp-server/pipeops-mcp-server
+/pipeops-mcp-server
+# Binaries for programs and plugins
+# Build output
+# Dependency directories
+# Environment variables
+# Go workspace file
+# IDE
+# OS
+# Output of the go coverage tool
+# Test binary, built with `go test -c`
+go.work
+Thumbs.db
+vendor/

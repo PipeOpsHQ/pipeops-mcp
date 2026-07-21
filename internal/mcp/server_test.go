@@ -769,6 +769,18 @@ func TestHandleMessage(t *testing.T) {
 			expectError: true,
 			checkResult: false,
 		},
+		{
+			name:        "ping",
+			method:      "ping",
+			expectError: false,
+			checkResult: true,
+		},
+		{
+			name:        "resources/list empty",
+			method:      "resources/list",
+			expectError: false,
+			checkResult: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -780,6 +792,9 @@ func TestHandleMessage(t *testing.T) {
 			}
 
 			response := server.handleMessage(ctx, msg)
+			if response == nil {
+				t.Fatal("Expected non-nil response for request with id")
+			}
 
 			if response.JSONRPC != "2.0" {
 				t.Errorf("Expected JSONRPC 2.0, got %s", response.JSONRPC)
@@ -799,6 +814,33 @@ func TestHandleMessage(t *testing.T) {
 				t.Error("Expected result in response")
 			}
 		})
+	}
+}
+
+func TestHandleMessageDropsNotifications(t *testing.T) {
+	server := &Server{}
+	ctx := context.Background()
+	msg := &Message{
+		JSONRPC: "2.0",
+		Method:  "notifications/initialized",
+	}
+	if resp := server.handleMessage(ctx, msg); resp != nil {
+		t.Fatalf("notifications must not get a response, got %+v", resp)
+	}
+}
+
+func TestResolveAuthTokenRejectsPlaceholders(t *testing.T) {
+	t.Setenv("PIPEOPS_TOKEN", "${PIPEOPS_TOKEN}")
+	if got := resolveAuthToken(); got != "" {
+		t.Fatalf("placeholder should resolve empty, got %q", got)
+	}
+	t.Setenv("PIPEOPS_TOKEN", "sat_real_looking_token_value")
+	if got := resolveAuthToken(); got == "" {
+		t.Fatal("real token rejected")
+	}
+	t.Setenv("PIPEOPS_TOKEN", "  ")
+	if got := resolveAuthToken(); got != "" {
+		t.Fatalf("blank token should be empty, got %q", got)
 	}
 }
 
