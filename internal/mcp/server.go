@@ -35,19 +35,22 @@ func NewServer() (*Server, error) {
 	} else {
 		email := strings.TrimSpace(os.Getenv("PIPEOPS_EMAIL"))
 		password := os.Getenv("PIPEOPS_PASSWORD")
-		if email == "" || password == "" {
-			return nil, fmt.Errorf("authentication required: set PIPEOPS_TOKEN (sat_… service token) or PIPEOPS_EMAIL and PIPEOPS_PASSWORD")
+		if email != "" && password != "" {
+			ctx := context.Background()
+			resp, _, err := client.Auth.Login(ctx, &pipeops.LoginRequest{
+				Email:    email,
+				Password: password,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("login failed: %w", err)
+			}
+			client.SetToken(resp.Data.Token)
+		} else {
+			// Allow the process to start so MCP handshake / tools/list work
+			// (Grok doctor, clients). API tool calls return 401 until PIPEOPS_TOKEN
+			// is set (workspace service token sat_… with api:read/api:write).
+			fmt.Fprintln(os.Stderr, "pipeops-mcp: warning: PIPEOPS_TOKEN not set; tools that call the API will fail until you export a service token")
 		}
-
-		ctx := context.Background()
-		resp, _, err := client.Auth.Login(ctx, &pipeops.LoginRequest{
-			Email:    email,
-			Password: password,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("login failed: %w", err)
-		}
-		client.SetToken(resp.Data.Token)
 	}
 
 	return &Server{client: client}, nil
