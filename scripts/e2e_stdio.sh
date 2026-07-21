@@ -73,7 +73,6 @@ try:
     print("OK tools/list count", len(tools))
 
     def tool(name, arguments=None, rid=10):
-        nonlocal issues
         r = call(proc, {
             "jsonrpc": "2.0", "id": rid, "method": "tools/call",
             "params": {"name": name, "arguments": arguments or {}},
