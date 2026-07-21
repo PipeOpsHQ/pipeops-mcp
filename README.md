@@ -149,7 +149,8 @@ pipeops-mcp-server
 - `deploy_project` - Trigger project deployment
 - `restart_project` - Restart a project
 - `stop_project` - Stop a project
-- `get_project_logs` - Retrieve project logs
+- `get_project_logs` - Retrieve project runtime logs
+- `get_project_build_logs` - Retrieve deployment build logs (Firebase `pipeops-build-logs` via control plane)
 - `get_project_env_variables` - Retrieve project environment variables
 - `update_project_env_variables` - Update project environment variables
 - `update_project_deploy_settings` - Update deploy/source-control settings (prefer-client thin body)
