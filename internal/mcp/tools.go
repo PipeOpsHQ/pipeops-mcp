@@ -350,6 +350,23 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
+				Name: "get_project_build_logs",
+				Description: "Get deployment build logs for a project (Firebase pipeops-build-logs, " +
+					"same source as the dashboard Build Logs tab). Prefer this for MCP after create/deploy. " +
+					"Defaults to the latest deployment when deployment_uuid/build_sha are omitted.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"project_id":       stringProperty("The project ID or UUID"),
+					"workspace_id":     stringProperty("Optional workspace ID or UUID"),
+					"deployment_uuid":  stringProperty("Optional deployment UUID (default: latest)"),
+					"build_sha":        stringProperty("Optional build SHA (default: from deployment)"),
+					"stage":            stringProperty("Optional stage filter: git, build, or deploy"),
+					"limit":            integerProperty("Max log lines (default 2000, max 5000)"),
+				}, "project_id"),
+			},
+			handler: s.getProjectBuildLogsTool,
+		},
+		{
+			tool: Tool{
 				Name:        "list_project_deployments",
 				Description: "List build or git deployments for a project",
 				InputSchema: objectSchema(map[string]interface{}{
@@ -2493,6 +2510,15 @@ type projectLogsArgs struct {
 	Search      string `json:"search,omitempty"`
 }
 
+type projectBuildLogsArgs struct {
+	ProjectID      string `json:"project_id"`
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+	DeploymentUUID string `json:"deployment_uuid,omitempty"`
+	BuildSha       string `json:"build_sha,omitempty"`
+	Stage          string `json:"stage,omitempty"`
+	Limit          int    `json:"limit,omitempty"`
+}
+
 type projectDeploymentsArgs struct {
 	ProjectID   string `json:"project_id"`
 	WorkspaceID string `json:"workspace_id,omitempty"`
@@ -4586,6 +4612,42 @@ func (s *Server) getProjectLogsTool(ctx context.Context, args map[string]interfa
 		return nil, directErr
 	}
 	return nil, fmt.Errorf("project %q not found", request.ProjectID)
+}
+
+func (s *Server) getProjectBuildLogsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var request projectBuildLogsArgs
+	if err := decodeArguments(args, &request); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(request.ProjectID) == "" {
+		return nil, fmt.Errorf("project_id is required")
+	}
+
+	var workspaceUUID string
+	if request.WorkspaceID != "" {
+		ws, err := s.resolveWorkspaceUUID(ctx, request.WorkspaceID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace: %w", err)
+		}
+		workspaceUUID = ws
+	} else {
+		ws, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+		if err == nil {
+			workspaceUUID = ws
+		}
+	}
+
+	resp, _, err := s.client.Projects.GetBuildLogs(ctx, request.ProjectID, &pipeops.BuildLogsOptions{
+		WorkspaceUUID:  workspaceUUID,
+		DeploymentUUID: request.DeploymentUUID,
+		BuildSha:       request.BuildSha,
+		Stage:          request.Stage,
+		Limit:          request.Limit,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
 }
 
 func (s *Server) listProjectDeploymentsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {

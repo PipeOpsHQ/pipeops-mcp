@@ -68,6 +68,7 @@ func TestHandleToolsList(t *testing.T) {
 		"restart_project",
 		"stop_project",
 		"get_project_logs",
+		"get_project_build_logs",
 		"list_project_deployments",
 		"list_project_deployment_history",
 		"search_project_deployments",
