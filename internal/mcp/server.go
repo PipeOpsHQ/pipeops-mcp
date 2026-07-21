@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/PipeOpsHQ/pipeops-go-sdk/pipeops"
 )
@@ -28,14 +29,14 @@ func NewServer() (*Server, error) {
 		return nil, fmt.Errorf("failed to create PipeOps client: %w", err)
 	}
 
-	token := os.Getenv("PIPEOPS_TOKEN")
+	token := resolveAuthToken()
 	if token != "" {
 		client.SetToken(token)
 	} else {
-		email := os.Getenv("PIPEOPS_EMAIL")
+		email := strings.TrimSpace(os.Getenv("PIPEOPS_EMAIL"))
 		password := os.Getenv("PIPEOPS_PASSWORD")
 		if email == "" || password == "" {
-			return nil, fmt.Errorf("authentication required: set PIPEOPS_TOKEN or PIPEOPS_EMAIL and PIPEOPS_PASSWORD")
+			return nil, fmt.Errorf("authentication required: set PIPEOPS_TOKEN (sat_… service token) or PIPEOPS_EMAIL and PIPEOPS_PASSWORD")
 		}
 
 		ctx := context.Background()
@@ -50,6 +51,25 @@ func NewServer() (*Server, error) {
 	}
 
 	return &Server{client: client}, nil
+}
+
+// resolveAuthToken reads PIPEOPS_TOKEN and rejects unexpanded shell/config
+// placeholders like "${PIPEOPS_TOKEN}" so Grok/Claude configs that pass
+// env = { PIPEOPS_TOKEN = "${PIPEOPS_TOKEN}" } fail fast when the var is unset.
+func resolveAuthToken() string {
+	token := strings.TrimSpace(os.Getenv("PIPEOPS_TOKEN"))
+	if token == "" {
+		return ""
+	}
+	if strings.HasPrefix(token, "${") && strings.HasSuffix(token, "}") {
+		return ""
+	}
+	// Common copy-paste placeholders
+	switch strings.ToLower(token) {
+	case "your-api-token-here", "paste-your-token-here", "sat_your_token_here", "<token>", "changeme":
+		return ""
+	}
+	return token
 }
 
 // newServerWithTokenAndScopes creates an isolated server and limits its MCP
@@ -124,6 +144,10 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 
 		response := s.handleMessage(ctx, &msg)
+		// Notifications (no id) must not get a JSON-RPC response.
+		if response == nil {
+			continue
+		}
 		if err := encoder.Encode(response); err != nil {
 			return fmt.Errorf("failed to encode response: %w", err)
 		}
@@ -131,7 +155,13 @@ func (s *Server) Run(ctx context.Context) error {
 }
 
 // handleMessage processes an incoming MCP message.
+// Returns nil when the message is a notification that must not be answered.
 func (s *Server) handleMessage(ctx context.Context, msg *Message) *Message {
+	// MCP notifications have no id. Acknowledge silently (do not reply).
+	if msg.ID == nil && strings.HasPrefix(msg.Method, "notifications/") {
+		return nil
+	}
+
 	response := &Message{
 		JSONRPC: "2.0",
 		ID:      msg.ID,
@@ -140,6 +170,12 @@ func (s *Server) handleMessage(ctx context.Context, msg *Message) *Message {
 	switch msg.Method {
 	case "initialize":
 		response.Result = s.handleInitialize()
+	case "notifications/initialized":
+		// Some clients send this as a request with an id; treat as success no-op.
+		response.Result = map[string]interface{}{}
+	case "ping":
+		// Required by MCP lifecycle / keepalive for several clients (incl. Grok).
+		response.Result = map[string]interface{}{}
 	case "tools/list":
 		response.Result = s.handleToolsList()
 	case "tools/call":
@@ -149,7 +185,16 @@ func (s *Server) handleMessage(ctx context.Context, msg *Message) *Message {
 		} else {
 			response.Result = result
 		}
+	case "resources/list":
+		// Not implemented; return empty list so clients do not fail handshake.
+		response.Result = map[string]interface{}{"resources": []interface{}{}}
+	case "prompts/list":
+		response.Result = map[string]interface{}{"prompts": []interface{}{}}
 	default:
+		// Unknown notifications: drop. Unknown requests: method not found.
+		if msg.ID == nil {
+			return nil
+		}
 		response.Error = &RPCError{
 			Code:    -32601,
 			Message: fmt.Sprintf("Method not found: %s", msg.Method),
