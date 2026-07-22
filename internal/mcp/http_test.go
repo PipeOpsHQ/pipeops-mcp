@@ -34,7 +34,7 @@ func TestLoadHTTPConfigFromEnvUsesCanonicalPublicURL(t *testing.T) {
 	if config.ResourceURL != "https://mcp.pipeops.app/mcp" {
 		t.Fatalf("ResourceURL = %q, want canonical .app URL", config.ResourceURL)
 	}
-	if config.OAuthStore != "sqlite" || config.OAuthSQLitePath != "/home/nonroot/.pipeops-mcp/oauth/pipeops-mcp-oauth.db" {
+	if config.OAuthStore != "sqlite" || config.OAuthSQLitePath != "/data/oauth/pipeops-mcp-oauth.db" {
 		t.Fatalf("OAuth SQLite defaults = store %q path %q", config.OAuthStore, config.OAuthSQLitePath)
 	}
 }

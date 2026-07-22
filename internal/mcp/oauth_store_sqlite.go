@@ -30,8 +30,7 @@ type sqliteOAuthStore struct {
 }
 
 // newSQLiteOAuthStore opens the OAuth SQLite database at path, falling back to
-// writable locations when the preferred path is not usable (common when a
-// root-owned PVC is mounted over /data without fsGroup for the nonroot user).
+// writable locations when the preferred path is not usable (e.g. read-only mount).
 func newSQLiteOAuthStore(ctx context.Context, path string) (*sqliteOAuthStore, error) {
 	candidates := oauthSQLitePathCandidates(path)
 	if len(candidates) == 0 {
@@ -43,9 +42,9 @@ func newSQLiteOAuthStore(ctx context.Context, path string) (*sqliteOAuthStore, e
 		store, err := openSQLiteOAuthStoreAt(ctx, candidate)
 		if err == nil {
 			if i > 0 {
-				// Preferred path failed (typically permission denied on /data).
-				// Ephemeral /tmp keeps the process healthy; fix PVC ownership for persistence.
-				fmt.Fprintf(os.Stderr, "pipeops-mcp: OAuth SQLite path %q is not usable; using %q instead (sessions may not persist across restarts). Fix volume ownership (fsGroup 65532) or set PIPEOPS_OAUTH_SQLITE_PATH to a writable path. First error: %v\n",
+				// Preferred path failed. Ephemeral /tmp keeps the process healthy
+				// but sessions will not survive restarts — fix the volume mount.
+				fmt.Fprintf(os.Stderr, "pipeops-mcp: OAuth SQLite path %q is not usable; using %q instead (sessions may not persist across restarts). Mount a writable volume at /data or set PIPEOPS_OAUTH_SQLITE_PATH. First error: %v\n",
 					candidates[0], candidate, errors.Join(errs...))
 			}
 			return store, nil
