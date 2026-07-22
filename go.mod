@@ -3,7 +3,7 @@ module github.com/PipeOpsHQ/pipeops-mcp
 go 1.25.0
 
 require (
-	github.com/PipeOpsHQ/pipeops-go-sdk v0.17.2
+	github.com/PipeOpsHQ/pipeops-go-sdk v0.17.3
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/redis/go-redis/v9 v9.17.2
 	modernc.org/sqlite v1.54.0

@@ -226,7 +226,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 					"name":             stringProperty("Project name (K8s-safe; spaces become dashes server-side)"),
 					"username":         stringProperty("VCS username/org that owns the repository (required for git)"),
 					"source":           stringProperty("VCS provider: github | gitlab | bitbucket | image. Default github if omitted"),
-					"repository":       stringProperty("Repo as owner/name (preferred) or full HTTPS URL (normalized server-side)"),
+					"repository":       stringProperty("Full HTTPS clone URL preferred (e.g. https://github.com/owner/repo). Short owner/repo is accepted and expanded to https://github.com/owner/repo before create."),
 					"branch":           stringProperty("Git branch to deploy"),
 					"cluster_uuid":     stringProperty("Target cluster/server UUID (maps to clusterUUID)"),
 					"clusterUUID":      stringProperty("Alias for cluster_uuid"),
@@ -4154,6 +4154,11 @@ func (s *Server) createProjectTool(ctx context.Context, args map[string]interfac
 	// Client env_vars win; SDK injects PORT only if missing and network port is set.
 	envVariables := createProjectEnvVarsFromArgs(args)
 
+	// Expand short owner/repo before Create so the control plane stores a
+	// cloneable URL even if an older API path skips server-side expand.
+	// ProjectService.Create also applies CanonicalizeRepository (prefer-client).
+	repository = pipeops.CanonicalizeRepository(repository, source)
+
 	req := &pipeops.CreateProjectRequest{
 		Name:               name,
 		Username:           username,
@@ -4774,12 +4779,16 @@ func (s *Server) updateProjectDeploySettingsTool(ctx context.Context, args map[s
 		}
 	}
 
+	// Prefer full HTTPS clone URLs; expand short owner/repo (same as create).
+	// Source defaults to github when not provided on this tool.
+	repository := pipeops.CanonicalizeRepository(request.Repository, "github")
+
 	resp, _, err := s.client.Projects.UpdateDeploySettings(ctx, request.ProjectID, &pipeops.DeploySettingsRequest{
 		AutoDeployEnabled: request.AutoDeployEnabled,
 		Branch:            request.Branch,
 		AutoRollback:      request.AutoRollback,
 		UserName:          request.Username,
-		Repository:        request.Repository,
+		Repository:        repository,
 		WorkspaceUUID:     workspaceUUID,
 	})
 	if err != nil {
