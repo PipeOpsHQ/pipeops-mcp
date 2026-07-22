@@ -29,7 +29,7 @@ PIPEOPS_BASE_URL=https://api.pipeops.io
 PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp
 PIPEOPS_OAUTH_MODE=bridge
 PIPEOPS_OAUTH_STORE=sqlite
-PIPEOPS_OAUTH_SQLITE_PATH=/home/nonroot/.pipeops-mcp/oauth/pipeops-mcp-oauth.db
+PIPEOPS_OAUTH_SQLITE_PATH=/data/oauth/pipeops-mcp-oauth.db
 PIPEOPS_OAUTH_ENCRYPTION_KEY=BASE64_ENCODED_32_BYTE_KEY
 ```
 
@@ -40,31 +40,28 @@ openssl rand -base64 32
 ```
 
 SQLite is the default and needs no separate database service. The container
-image pre-creates two directories owned by UID/GID `65532`:
+runs as **root** (not distroless `nonroot`/65532) so a root-owned PVC mounted
+at `/data` works without `fsGroup` remapping. The image pre-creates:
 
-- `/home/nonroot/.pipeops-mcp/oauth` — **default** path (works without a volume)
-- `/data/oauth` — optional durable path when a PVC is mounted with `fsGroup`
+- `/data/oauth` — **default** path (`PIPEOPS_OAUTH_SQLITE_PATH`)
 
 Run one MCP replica in SQLite mode; do not put the SQLite file on a shared
 network filesystem. Prefer mode `0700` on the directory and `0600` on the
 database/WAL files. If the configured path is not writable, the server falls
-back to `$TMPDIR/pipeops-mcp-oauth/` and logs a warning.
+back to `$TMPDIR/pipeops-mcp-oauth/` and logs a warning (sessions will not
+survive restarts).
 
-For durable SQLite across pod restarts on Kubernetes, mount a volume and point
-the env var at it (do not mount over `/home/nonroot` unless the volume is
-writable by 65532):
+For durable SQLite across pod restarts on Kubernetes, mount a volume at
+`/data` (or point `PIPEOPS_OAUTH_SQLITE_PATH` at another writable path):
 
 ```yaml
-securityContext:
-  fsGroup: 65532
-  runAsUser: 65532
-  runAsGroup: 65532
 env:
   - name: PIPEOPS_OAUTH_SQLITE_PATH
     value: /data/oauth/pipeops-mcp-oauth.db
 volumeMounts:
   - name: oauth-data
     mountPath: /data
+# No fsGroup / runAsUser:65532 required for SQLite when the process runs as root.
 ```
 
 OAuth material is encrypted at rest with `PIPEOPS_OAUTH_ENCRYPTION_KEY`.

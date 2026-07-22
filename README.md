@@ -77,7 +77,7 @@ Hosted transport configuration:
 - `PIPEOPS_MCP_PUBLIC_URL=https://mcp.pipeops.app/mcp` sets the OAuth resource URL
 - `PIPEOPS_OAUTH_MODE=bearer|bridge|external` selects the hosted authentication mode
 - `PIPEOPS_OAUTH_STORE=sqlite|redis` selects bridge persistence (defaults to `sqlite`)
-- `PIPEOPS_OAUTH_SQLITE_PATH` sets the SQLite file (default `/home/nonroot/.pipeops-mcp/oauth/pipeops-mcp-oauth.db`; use `/data/oauth/...` with a writable PVC for multi-restart durability)
+- `PIPEOPS_OAUTH_SQLITE_PATH` sets the SQLite file (default `/data/oauth/pipeops-mcp-oauth.db`; mount a PVC at `/data` so sessions survive restarts)
 - `PIPEOPS_OAUTH_REDIS_URL` is required only when `PIPEOPS_OAUTH_STORE=redis`
 - `PIPEOPS_OAUTH_ENCRYPTION_KEY` is required in `bridge` mode and must be a base64-encoded 32-byte key
 - `PIPEOPS_OAUTH_ISSUER` optionally overrides the bridge issuer and is required in `external` mode
@@ -87,13 +87,11 @@ Hosted transport configuration:
 - `PIPEOPS_CONSOLE_OAUTH_SCOPES` optionally overrides the Console scopes (defaults to `openid,profile,email`)
 
 Generate the bridge encryption key with `openssl rand -base64 32`. The image
-pre-creates `/home/nonroot/.pipeops-mcp/oauth` (default SQLite path) and
-`/data/oauth` owned by UID/GID `65532`. Use the home path by default so a PVC
-mounted over `/data` cannot break startup. For durable SQLite across restarts,
-mount a volume writable by `65532` (`fsGroup: 65532`) and set
-`PIPEOPS_OAUTH_SQLITE_PATH=/data/oauth/pipeops-mcp-oauth.db`. Use Redis when
-multiple MCP replicas need shared state. Do not set a shared `PIPEOPS_TOKEN` on
-the hosted service; each customer authorizes their own PipeOps Console session.
+runs as root and pre-creates `/data/oauth` (default SQLite path). Mount a PVC
+at `/data` so OAuth sessions survive pod restarts; no `fsGroup`/UID remapping
+is required for root-owned volumes. Use Redis when multiple MCP replicas need
+shared state. Do not set a shared `PIPEOPS_TOKEN` on the hosted service; each
+customer authorizes their own PipeOps Console session.
 
 ## Usage
 

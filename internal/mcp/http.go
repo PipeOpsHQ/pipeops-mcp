@@ -22,10 +22,11 @@ const (
 	defaultResourceURL     = "https://mcp.pipeops.app/mcp"
 	defaultHTTPAddr        = ":8080"
 	defaultMaxBodySize     = int64(4 << 20)
-	defaultOAuthStore      = "sqlite"
-	// Default lives under the distroless nonroot home so it works without a
-	// writable PVC. Mount a volume and set PIPEOPS_OAUTH_SQLITE_PATH for durability.
-	defaultSQLitePath = "/home/nonroot/.pipeops-mcp/oauth/pipeops-mcp-oauth.db"
+	defaultOAuthStore = "sqlite"
+	// Default under /data so a PVC mounted at /data keeps OAuth sessions across
+	// pod restarts. Container runs as root so root-owned volumes work without
+	// fsGroup/UID remapping. Override with PIPEOPS_OAUTH_SQLITE_PATH if needed.
+	defaultSQLitePath = "/data/oauth/pipeops-mcp-oauth.db"
 	defaultConsoleURL      = "https://console.pipeops.io"
 	defaultConsoleClientID = "pipeops_public_client"
 )
