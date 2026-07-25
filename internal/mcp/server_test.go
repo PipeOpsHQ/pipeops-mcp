@@ -390,8 +390,10 @@ func TestHandleToolsListSchemas(t *testing.T) {
 	if !ok {
 		t.Fatal("Expected create_project properties schema")
 	}
+	// Prefer a single workspace_id field for AI clients (handler still accepts
+	// workspace_uuid via resolveDefaultWorkspaceUUID if passed in args).
 	for _, field := range []string{
-		"cluster_uuid", "server_id", "environment_uuid", "workspace_id", "workspace_uuid",
+		"cluster_uuid", "server_id", "environment_uuid", "workspace_id",
 		"build_method", "build_command", "run_command", "port", "env_vars", "build_settings",
 	} {
 		if _, ok := createProjectProperties[field]; !ok {
@@ -634,13 +636,16 @@ func TestHandleToolsListSchemas(t *testing.T) {
 	}
 
 	listExternalRegistries := toolByName["list_external_registries"]
-	listExternalRegistriesRequired, ok := listExternalRegistries.InputSchema["required"].([]string)
-	if !ok {
-		t.Fatal("Expected list_external_registries required schema to be []string")
+	// workspace_id is optional (defaults to first workspace) for AI-friendly thin calls.
+	if required, ok := listExternalRegistries.InputSchema["required"].([]string); ok && len(required) > 0 {
+		t.Fatalf("Expected list_external_registries to require no fields, got %v", required)
 	}
-
-	if len(listExternalRegistriesRequired) != 1 || listExternalRegistriesRequired[0] != "workspace_id" {
-		t.Fatalf("Expected list_external_registries to require only workspace_id, got %v", listExternalRegistriesRequired)
+	listExternalRegistriesProps, ok := listExternalRegistries.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected list_external_registries properties schema")
+	}
+	if _, ok := listExternalRegistriesProps["workspace_id"]; !ok {
+		t.Fatal("Expected list_external_registries to expose workspace_id")
 	}
 
 	searchPublicRegistryImages := toolByName["search_public_registry_images"]

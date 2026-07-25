@@ -235,7 +235,6 @@ func (s *Server) toolDefinitions() []toolDefinition {
 					"environment_id":   stringProperty("Legacy alias for environment_uuid"),
 					"environment":      stringProperty("Environment name/slug for display. Default development if omitted"),
 					"workspace_id":     stringProperty("Workspace UUID/ID. Default: first workspace if omitted"),
-					"workspace_uuid":   stringProperty("Alias for workspace_id (body workspace_uuid)"),
 					"commit_url":       stringProperty("Commit URL (dashboard sends real commit link; default repository URL if empty)"),
 					"commit_sha":       stringProperty("Commit SHA to build (prefer real SHA from list_vcs_branches / git)"),
 					"language":         stringProperty("repositoryLanguage, e.g. nodejs, go, dockerfile"),
@@ -589,12 +588,12 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "list_external_registries",
-				Description: "List external registries for a workspace",
+				Description: "List external registries for a workspace (defaults to the first available workspace when workspace_id is omitted)",
 				InputSchema: objectSchema(map[string]interface{}{
-					"workspace_id": stringProperty("The workspace ID that owns the registries"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
 					"page":         integerProperty("Optional page number"),
 					"limit":        integerProperty("Optional page size"),
-				}, "workspace_id"),
+				}),
 			},
 			handler: s.listExternalRegistriesTool,
 		},
@@ -996,10 +995,11 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
-				Name:        "search_addons",
-				Description: "Search available add-ons",
+				Name: "search_addons",
+				Description: "Search marketplace add-ons by text query (required). " +
+					"To browse all add-ons without a query, use list_addons instead.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"search":       stringProperty("The add-on search text"),
+					"search":       stringProperty("Required search query text (e.g. redis, postgres). For unfiltered browse use list_addons."),
 					"page":         integerProperty("Optional page number"),
 					"limit":        integerProperty("Optional page size"),
 					"category":     stringProperty("Optional add-on category filter"),
@@ -1791,11 +1791,31 @@ func (s *Server) handleToolsCall(ctx context.Context, params json.RawMessage) (i
 
 	for _, definition := range s.toolDefinitions() {
 		if definition.tool.Name == callParams.Name {
-			return definition.handler(ctx, callParams.Arguments)
+			result, err := definition.handler(ctx, callParams.Arguments)
+			if err != nil {
+				return nil, formatToolCallError(err)
+			}
+			return result, nil
 		}
 	}
 
 	return nil, fmt.Errorf("unknown tool: %s", callParams.Name)
+}
+
+// formatToolCallError rewrites opaque API errors into actionable guidance for AI clients.
+func formatToolCallError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	// Controller returns HTTP 419 for ended/revoked user sessions (JWT may still look unexpired).
+	if strings.Contains(msg, " 419 ") || strings.HasSuffix(msg, ": 419") || strings.Contains(msg, "session has ended") {
+		return fmt.Errorf("%w — PipeOps session expired or was revoked (HTTP 419). Re-authenticate: set a fresh PIPEOPS_TOKEN (service token) or re-run OAuth login (pipeops login / MCP authorize)", err)
+	}
+	if strings.Contains(msg, " 401 ") || strings.Contains(msg, "invalid or missing authentication") || strings.Contains(msg, "cookie token is empty") {
+		return fmt.Errorf("%w — Not authenticated. Export PIPEOPS_TOKEN=sat_… or complete MCP OAuth before calling tools", err)
+	}
+	return err
 }
 
 func emptySchema() map[string]interface{} {
@@ -5044,13 +5064,20 @@ func (s *Server) listExternalRegistriesTool(ctx context.Context, args map[string
 	if err := decodeArguments(args, &req); err != nil {
 		return nil, err
 	}
-	if req.WorkspaceID == "" {
-		return nil, fmt.Errorf("workspace_id is required")
-	}
 
-	workspaceUUID, err := s.resolveWorkspaceUUID(ctx, req.WorkspaceID)
+	// Prefer-client optional workspace: default to first workspace like list_volumes/list_servers.
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
 	if err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(req.WorkspaceID) != "" {
+		workspaceUUID, err = s.resolveWorkspaceUUID(ctx, req.WorkspaceID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if strings.TrimSpace(workspaceUUID) == "" {
+		return nil, fmt.Errorf("workspace_id is required (or ensure the account has at least one workspace)")
 	}
 
 	resp, _, err := s.client.ExternalRegistries.List(ctx, workspaceUUID, &pipeops.ExternalRegistryListOptions{
@@ -6014,7 +6041,7 @@ func (s *Server) searchAddOnsTool(ctx context.Context, args map[string]interface
 		return nil, err
 	}
 	if strings.TrimSpace(req.Search) == "" {
-		return nil, fmt.Errorf("search is required")
+		return nil, fmt.Errorf("search is required (pass a query like \"redis\"); use list_addons to browse all add-ons without a query")
 	}
 	return s.listAddOnsResponse(ctx, req)
 }
