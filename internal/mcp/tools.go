@@ -40,8 +40,9 @@ type toolDefinition struct {
 }
 
 type listGitOpsApplicationsArgs struct {
-	Page  int `json:"page,omitempty"`
-	Limit int `json:"limit,omitempty"`
+	Page        int    `json:"page,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 
@@ -409,9 +410,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_project_env_variables",
-				Description: "Get environment variables for a project",
+				Description: "Get environment variables for a project. Optional workspace_id scopes multi-workspace accounts; omit to use the unscoped project path.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"project_id": stringProperty("The project ID or UUID"),
+					"project_id":   stringProperty("The project ID or UUID"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID (prefer project workspace, not first listed)"),
 				}, "project_id"),
 			},
 			handler: s.getProjectEnvVariablesTool,
@@ -1223,8 +1225,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "list_billing_plans",
-				Description: "List available billing plans",
-				InputSchema: emptySchema(),
+				Description: "List available billing plans (priced by location; defaults to US)",
+				InputSchema: objectSchema(map[string]interface{}{
+					"location": stringProperty("Optional ISO country code for pricing (default US)"),
+				}),
 			},
 			handler: s.listBillingPlansTool,
 		},
@@ -1351,10 +1355,11 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "list_gitops_applications",
-				Description: "List GitOps application configurations for the current workspace session",
+				Description: "List GitOps application configurations for a workspace (pass workspace_id; required by the API)",
 				InputSchema: objectSchema(map[string]interface{}{
-					"page":  integerProperty("Optional page number"),
-					"limit": integerProperty("Optional page size"),
+					"workspace_id": stringProperty("Workspace ID or UUID (required for multi-workspace accounts)"),
+					"page":         integerProperty("Optional page number"),
+					"limit":        integerProperty("Optional page size"),
 				}),
 			},
 			handler: s.listGitOpsApplicationsTool,
@@ -4031,6 +4036,17 @@ func (s *Server) getProjectTool(ctx context.Context, args map[string]interface{}
 		workspaceUUID = projectWorkspaceUUID(nil, workspace)
 	}
 
+	projectResponseUsable := func(resp *pipeops.ProjectResponse) bool {
+		if resp == nil {
+			return false
+		}
+		// HTTP 204 / empty body decodes to a zero Project — treat as unusable
+		// so we fall back to list metadata instead of "ID only" payloads.
+		return strings.TrimSpace(resp.Data.Project.UUID) != "" ||
+			strings.TrimSpace(resp.Data.Project.Name) != "" ||
+			strings.TrimSpace(resp.Data.Project.ID.String()) != ""
+	}
+
 	var directErr error
 	if isLikelyDirectProjectIdentifier(req.ProjectID) {
 		var (
@@ -4042,10 +4058,10 @@ func (s *Server) getProjectTool(ctx context.Context, args map[string]interface{}
 		} else {
 			resp, _, err = s.client.Projects.Get(ctx, req.ProjectID)
 		}
-		if err == nil {
+		if err == nil && projectResponseUsable(resp) {
 			return jsonResult(resp)
 		}
-		if !isWorkspaceProjectsFallbackError(err) {
+		if err != nil && !isWorkspaceProjectsFallbackError(err) {
 			return nil, err
 		}
 		directErr = err
@@ -4074,17 +4090,17 @@ func (s *Server) getProjectTool(ctx context.Context, args map[string]interface{}
 		} else {
 			resp, _, err = s.client.Projects.Get(ctx, resolvedProjectID)
 		}
-		if err == nil {
+		if err == nil && projectResponseUsable(resp) {
 			return jsonResult(resp)
 		}
-		if !isWorkspaceProjectsFallbackError(err) {
+		if err != nil && !isWorkspaceProjectsFallbackError(err) {
 			return nil, err
 		}
 	}
 
 	return jsonResult(map[string]interface{}{
 		"status":  "success",
-		"message": "ok",
+		"message": "project resolved from list (direct fetch returned empty or incomplete payload; cluster may be missing)",
 		"data": map[string]interface{}{
 			"project": project,
 		},
@@ -4432,6 +4448,10 @@ func (s *Server) deployProjectTool(ctx context.Context, args map[string]interfac
 		WorkspaceUUID: workspaceUUID,
 		NoCache:       noCache,
 	}); err != nil {
+		msg := err.Error()
+		if strings.Contains(strings.ToLower(msg), "cluster") && strings.Contains(strings.ToLower(msg), "not found") {
+			return nil, fmt.Errorf("deploy failed: project cluster is missing or deleted (%s). Re-bind the project to a live server/cluster before redeploying", msg)
+		}
 		return nil, err
 	}
 	return textResult("Deployment triggered successfully"), nil
@@ -4734,7 +4754,20 @@ func (s *Server) getProjectEnvVariablesTool(ctx context.Context, args map[string
 		return nil, err
 	}
 
-	resp, _, err := s.client.Projects.GetEnvVariables(ctx, projectID)
+	var opts *pipeops.ProjectEnvVariablesOptions
+	workspaceID := firstNonEmptyString(
+		optionalStringArg(args, "workspace_id"),
+		optionalStringArg(args, "workspace_uuid"),
+	)
+	if workspaceID != "" {
+		ws, err := s.resolveWorkspaceUUID(ctx, workspaceID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace: %w", err)
+		}
+		opts = &pipeops.ProjectEnvVariablesOptions{WorkspaceUUID: ws}
+	}
+
+	resp, _, err := s.client.Projects.GetEnvVariables(ctx, projectID, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -5680,6 +5713,43 @@ func (s *Server) listEnvironmentsForWorkspace(ctx context.Context, workspaceID s
 	}, nil
 }
 
+
+func findEnvironmentInListResponse(listed map[string]interface{}, environmentID string) map[string]interface{} {
+	environmentID = strings.TrimSpace(environmentID)
+	if listed == nil || environmentID == "" {
+		return nil
+	}
+	data, _ := listed["data"].(map[string]interface{})
+	if data == nil {
+		return nil
+	}
+	rawEnvs, ok := data["environments"]
+	if !ok {
+		return nil
+	}
+	var items []map[string]interface{}
+	switch typed := rawEnvs.(type) {
+	case []map[string]interface{}:
+		items = typed
+	case []interface{}:
+		for _, item := range typed {
+			if m, ok := item.(map[string]interface{}); ok {
+				items = append(items, m)
+			}
+		}
+	}
+	needle := strings.ToLower(environmentID)
+	for _, env := range items {
+		id := strings.ToLower(strings.TrimSpace(environmentIdentity(env)))
+		name := strings.ToLower(strings.TrimSpace(extractString(lookupValue(env, "Name", "name"))))
+		uuid := strings.ToLower(strings.TrimSpace(extractString(lookupValue(env, "UUID", "uuid", "ID", "id"))))
+		if id == needle || uuid == needle || name == needle {
+			return env
+		}
+	}
+	return nil
+}
+
 func (s *Server) getEnvironmentTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	environmentID, err := requiredString(args, "environment_id")
 	if err != nil {
@@ -5687,10 +5757,28 @@ func (s *Server) getEnvironmentTool(ctx context.Context, args map[string]interfa
 	}
 
 	resp, _, err := s.client.Environments.Get(ctx, environmentID)
-	if err != nil {
-		return nil, err
+	if err == nil {
+		return jsonResult(resp)
 	}
-	return jsonResult(resp)
+	directErr := err
+
+	// Control plane historically returned opaque 400s for get-by-uuid when
+	// cluster lookup failed. Fall back to list payloads so agents still get
+	// name/cluster/namespace for a known environment UUID.
+	listed, listErr := s.listEnvironmentsAcrossWorkspaces(ctx)
+	if listErr != nil {
+		return nil, directErr
+	}
+	if match := findEnvironmentInListResponse(listed, environmentID); match != nil {
+		return jsonResult(map[string]interface{}{
+			"status":  "success",
+			"message": "environment resolved from list (direct fetch unavailable)",
+			"data": map[string]interface{}{
+				"environment": match,
+			},
+		})
+	}
+	return nil, directErr
 }
 
 func (s *Server) createEnvironmentTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -6424,8 +6512,13 @@ func (s *Server) getBillingInfoTool(ctx context.Context, args map[string]interfa
 	return jsonResult(billingInfo)
 }
 
-func (s *Server) listBillingPlansTool(ctx context.Context, _ map[string]interface{}) (interface{}, error) {
-	resp, _, err := s.client.Billing.GetPlans(ctx)
+func (s *Server) listBillingPlansTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	location := optionalStringArg(args, "location")
+	var opts *pipeops.PlansListOptions
+	if location != "" {
+		opts = &pipeops.PlansListOptions{Location: location}
+	}
+	resp, _, err := s.client.Billing.GetPlans(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -6665,9 +6758,27 @@ func (s *Server) listGitOpsApplicationsTool(ctx context.Context, args map[string
 		return nil, err
 	}
 
+	workspaceUUID := ""
+	if strings.TrimSpace(req.WorkspaceID) != "" {
+		ws, err := s.resolveWorkspaceUUID(ctx, req.WorkspaceID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace: %w", err)
+		}
+		workspaceUUID = ws
+	} else {
+		// Prefer-client: default to first workspace so list is usable without args.
+		if ws, err := s.resolveDefaultWorkspaceUUID(ctx, args); err == nil {
+			workspaceUUID = ws
+		}
+	}
+	if strings.TrimSpace(workspaceUUID) == "" {
+		return nil, fmt.Errorf("workspace_id is required for list_gitops_applications")
+	}
+
 	resp, _, err := s.client.GitOps.List(ctx, &pipeops.GitOpsListOptions{
-		Page:  req.Page,
-		Limit: req.Limit,
+		Page:          req.Page,
+		Limit:         req.Limit,
+		WorkspaceUUID: workspaceUUID,
 	})
 	if err != nil {
 		return nil, err
