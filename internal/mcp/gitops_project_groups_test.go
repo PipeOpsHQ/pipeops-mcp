@@ -184,16 +184,24 @@ func TestListGitOpsApplicationsTool(t *testing.T) {
 			if r.Method != http.MethodGet {
 				t.Fatalf("method = %s, want GET", r.Method)
 			}
-			if r.URL.Path != "/api/v1/gitops/applications" {
-				t.Fatalf("path = %s, want /api/v1/gitops/applications", r.URL.Path)
+			switch r.URL.Path {
+			case "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":[{"UUID":"ws-gitops","Name":"ws"}],"message":"ok","success":true}`), nil
+			case "/api/v1/gitops/applications":
+				if got := r.URL.Query().Get("page"); got != "2" {
+					t.Fatalf("page = %q, want %q", got, "2")
+				}
+				if got := r.URL.Query().Get("limit"); got != "10" {
+					t.Fatalf("limit = %q, want %q", got, "10")
+				}
+				if got := r.URL.Query().Get("workspace_uuid"); got != "ws-gitops" {
+					t.Fatalf("workspace_uuid = %q, want %q", got, "ws-gitops")
+				}
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"items":[{"uuid":"gitops-1","name":"app"}],"total":1,"page":2,"limit":10,"total_pages":1}}`), nil
+			default:
+				t.Fatalf("unexpected path %s", r.URL.Path)
+				return nil, nil
 			}
-			if got := r.URL.Query().Get("page"); got != "2" {
-				t.Fatalf("page = %q, want %q", got, "2")
-			}
-			if got := r.URL.Query().Get("limit"); got != "10" {
-				t.Fatalf("limit = %q, want %q", got, "10")
-			}
-			return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"items":[{"uuid":"gitops-1","name":"app"}],"total":1,"page":2,"limit":10,"total_pages":1}}`), nil
 		}),
 	})
 
