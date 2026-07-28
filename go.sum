@@ -1,5 +1,5 @@
-github.com/PipeOpsHQ/pipeops-go-sdk v0.17.8-0.20260728192743-b6ebce56cb0e h1:UJ0QmwvP3zxXWMofGGRwdwgatZZxK0SsKSlR0WGvSOA=
-github.com/PipeOpsHQ/pipeops-go-sdk v0.17.8-0.20260728192743-b6ebce56cb0e/go.mod h1:06tq3WBPqAYhzmRErIlN6GMFN+jxDinMUDThl5DrM7E=
+github.com/PipeOpsHQ/pipeops-go-sdk v0.17.8 h1:AdwE2aGJKac3BpnlKmXALWSDwqYP98yFR+ebxIbD1gE=
+github.com/PipeOpsHQ/pipeops-go-sdk v0.17.8/go.mod h1:06tq3WBPqAYhzmRErIlN6GMFN+jxDinMUDThl5DrM7E=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=
 github.com/bsm/ginkgo/v2 v2.12.0/go.mod h1:SwYbGRRDovPVboqFv0tPTcG1sN61LM1Z4ARdbAV9g4c=
 github.com/bsm/gomega v1.27.10 h1:yeMWxP2pV2fG3FgAODIY8EiRE3dy0aeFYt4l7wh6yKA=
