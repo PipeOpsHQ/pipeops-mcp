@@ -760,9 +760,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "list_environments",
-				Description: "List all environments",
+				Description: "List environments. By default environments on deleted/unavailable servers are filtered out; pass include_stale=true to keep them.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"workspace_id": stringProperty("Optional workspace ID or UUID filter"),
+					"workspace_id":  stringProperty("Optional workspace ID or UUID filter"),
+					"include_stale": booleanProperty("When true, include environments whose server no longer exists (default false)"),
 				}),
 			},
 			handler: s.listEnvironmentsTool,
@@ -2595,7 +2596,8 @@ type projectSecurityPolicyArgs struct {
 }
 
 type listEnvironmentsArgs struct {
-	WorkspaceID string `json:"workspace_id,omitempty"`
+	WorkspaceID  string `json:"workspace_id,omitempty"`
+	IncludeStale *bool  `json:"include_stale,omitempty"` // when true, keep envs for deleted/unavailable servers
 }
 
 type updateEnvironmentArgs struct {
@@ -5646,7 +5648,140 @@ func (s *Server) listEnvironmentsTool(ctx context.Context, args map[string]inter
 	if err != nil {
 		return nil, err
 	}
+	// Default: drop environments whose cluster is not in the live server list
+	// (deleted/deactivated servers left orphaned env rows that confuse agents).
+	includeStale := req.IncludeStale != nil && *req.IncludeStale
+	if !includeStale {
+		resp = s.filterEnvironmentsToLiveServers(ctx, resp, req.WorkspaceID)
+	}
 	return jsonResult(resp)
+}
+
+// filterEnvironmentsToLiveServers keeps only environments whose ClusterUUID
+// matches a server still returned by list_servers for the workspace(s).
+func (s *Server) filterEnvironmentsToLiveServers(ctx context.Context, resp map[string]interface{}, workspaceID string) map[string]interface{} {
+	if resp == nil {
+		return resp
+	}
+	data, _ := resp["data"].(map[string]interface{})
+	if data == nil {
+		return resp
+	}
+	rawEnvs, ok := data["environments"]
+	if !ok {
+		return resp
+	}
+	var envs []map[string]interface{}
+	switch typed := rawEnvs.(type) {
+	case []map[string]interface{}:
+		envs = typed
+	case []interface{}:
+		for _, item := range typed {
+			if m, ok := item.(map[string]interface{}); ok {
+				envs = append(envs, m)
+			}
+		}
+	default:
+		return resp
+	}
+	if len(envs) == 0 {
+		return resp
+	}
+
+	liveClusters := s.liveClusterUUIDSet(ctx, workspaceID)
+	if len(liveClusters) == 0 {
+		// If we cannot resolve servers, leave list unchanged rather than empty all.
+		return resp
+	}
+
+	filtered := make([]map[string]interface{}, 0, len(envs))
+	dropped := 0
+	for _, env := range envs {
+		clusterUUID := strings.ToLower(strings.TrimSpace(extractString(lookupValue(env,
+			"ClusterUUID", "cluster_uuid", "clusterUUID", "ServerUUID", "server_uuid", "server_id"))))
+		if clusterUUID == "" {
+			// Keep envs with no cluster tag (unknown) so we don't over-filter.
+			filtered = append(filtered, env)
+			continue
+		}
+		if _, ok := liveClusters[clusterUUID]; ok {
+			filtered = append(filtered, env)
+		} else {
+			dropped++
+		}
+	}
+	data["environments"] = filtered
+	if dropped > 0 {
+		resp["message"] = strings.TrimSpace(fmt.Sprintf("%s filtered %d environment(s) on deleted/unavailable servers (pass include_stale=true to keep them)",
+			extractString(resp["message"]), dropped))
+	}
+	return resp
+}
+
+func (s *Server) liveClusterUUIDSet(ctx context.Context, workspaceID string) map[string]struct{} {
+	out := make(map[string]struct{})
+	var resp map[string]interface{}
+	var err error
+	if strings.TrimSpace(workspaceID) != "" {
+		resp, err = s.listServersForWorkspace(ctx, workspaceID)
+	} else {
+		resp, err = s.listServersAcrossWorkspaces(ctx)
+	}
+	if err != nil || resp == nil {
+		return out
+	}
+	data, _ := resp["data"].(map[string]interface{})
+	if data == nil {
+		// some shapes put servers at top-level data as list
+		if list, ok := resp["data"].([]interface{}); ok {
+			for _, item := range list {
+				if m, ok := item.(map[string]interface{}); ok {
+					s.addClusterUUIDFromServerMap(out, m)
+				}
+			}
+		}
+		return out
+	}
+	for _, key := range []string{"servers", "clusters", "Servers", "Clusters"} {
+		if list, ok := data[key].([]interface{}); ok {
+			for _, item := range list {
+				if m, ok := item.(map[string]interface{}); ok {
+					s.addClusterUUIDFromServerMap(out, m)
+				}
+			}
+		}
+		if list, ok := data[key].([]map[string]interface{}); ok {
+			for _, m := range list {
+				s.addClusterUUIDFromServerMap(out, m)
+			}
+		}
+	}
+	return out
+}
+
+func (s *Server) addClusterUUIDFromServerMap(out map[string]struct{}, m map[string]interface{}) {
+	if m == nil {
+		return
+	}
+	// Nested Cluster object from list_servers
+	if nested, ok := lookupValue(m, "Cluster", "cluster").(map[string]interface{}); ok {
+		s.addClusterUUIDFromServerMap(out, nested)
+	}
+	// Skip clearly deleted/unavailable when status is present
+	status := strings.ToLower(strings.TrimSpace(extractString(lookupValue(m, "status", "Status"))))
+	if status != "" {
+		switch status {
+		case "deleted", "deleting", "unavailable", "deactivated", "cordoned":
+			return
+		}
+	}
+	for _, key := range []string{"uuid", "UUID", "id", "ID", "cluster_uuid", "ClusterUUID"} {
+		if v := strings.ToLower(strings.TrimSpace(extractString(lookupValue(m, key)))); v != "" && len(v) > 8 {
+			// Prefer uuid-shaped values
+			out[v] = struct{}{}
+			return
+		}
+	}
 }
 
 func (s *Server) listEnvironmentsAcrossWorkspaces(ctx context.Context) (map[string]interface{}, error) {
