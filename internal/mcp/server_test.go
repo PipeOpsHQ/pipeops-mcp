@@ -3152,7 +3152,7 @@ func TestListEnvironmentsToolAggregatesAcrossWorkspacesUsingWorkspaceFetchIDFall
 	})
 
 	server := &Server{client: client}
-	result, err := server.listEnvironmentsTool(context.Background(), nil)
+	result, err := server.listEnvironmentsTool(context.Background(), map[string]interface{}{"include_stale": true})
 	if err != nil {
 		t.Fatalf("listEnvironmentsTool error: %v", err)
 	}
@@ -3244,7 +3244,7 @@ func TestListEnvironmentsToolSkipsZeroWorkspaceIDFallback(t *testing.T) {
 	})
 
 	server := &Server{client: client}
-	result, err := server.listEnvironmentsTool(context.Background(), nil)
+	result, err := server.listEnvironmentsTool(context.Background(), map[string]interface{}{"include_stale": true})
 	if err != nil {
 		t.Fatalf("listEnvironmentsTool error: %v", err)
 	}
@@ -3301,7 +3301,7 @@ func TestListEnvironmentsToolExplicitWorkspaceFallsBackToWorkspaceID(t *testing.
 	})
 
 	server := &Server{client: client}
-	result, err := server.listEnvironmentsTool(context.Background(), map[string]interface{}{"workspace_id": "w1"})
+	result, err := server.listEnvironmentsTool(context.Background(), map[string]interface{}{"workspace_id": "w1", "include_stale": true})
 	if err != nil {
 		t.Fatalf("listEnvironmentsTool error: %v", err)
 	}
@@ -3326,6 +3326,60 @@ func TestListEnvironmentsToolExplicitWorkspaceFallsBackToWorkspaceID(t *testing.
 	}
 	if requests["/environment/fetch"] != 0 {
 		t.Fatalf("environment/fetch calls = %d, want 0", requests["/environment/fetch"])
+	}
+}
+
+func TestListEnvironmentsToolFiltersStaleByDefault(t *testing.T) {
+	t.Parallel()
+
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"w1"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w1":
+				// Live server only; env on deleted cluster is stale.
+				// UUIDs must be >8 chars (liveClusterUUIDSet ignores short ids).
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"w1","Clusters":[{"uuid":"cluster-live-001","name":"live","status":"active"}],"environments":[{"UUID":"env-live-001","Name":"prod","ClusterUUID":"cluster-live-001"},{"UUID":"env-stale-001","Name":"ghost","ClusterUUID":"cluster-gone-001"},{"UUID":"env-unknown-1","Name":"untagged"}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/1":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"w1","Clusters":[{"uuid":"cluster-live-001","name":"live","status":"active"}],"environments":[{"UUID":"env-live-001","Name":"prod","ClusterUUID":"cluster-live-001"},{"UUID":"env-stale-001","Name":"ghost","ClusterUUID":"cluster-gone-001"},{"UUID":"env-unknown-1","Name":"untagged"}]}}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listEnvironmentsTool(context.Background(), map[string]interface{}{"workspace_id": "w1"})
+	if err != nil {
+		t.Fatalf("listEnvironmentsTool error: %v", err)
+	}
+	resultMap := result.(map[string]interface{})
+	textContent := resultMap["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
+
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(textContent), &payload); err != nil {
+		t.Fatalf("failed to decode result JSON: %v", err)
+	}
+	environments := payload["data"].(map[string]interface{})["environments"].([]interface{})
+	if len(environments) != 2 {
+		t.Fatalf("environments len = %d, want 2 (live + untagged)", len(environments))
+	}
+	got := map[string]bool{}
+	for _, item := range environments {
+		env := item.(map[string]interface{})
+		got[env["UUID"].(string)] = true
+	}
+	if !got["env-live-001"] || !got["env-unknown-1"] || got["env-stale-001"] {
+		t.Fatalf("filtered envs = %v, want env-live-001 + env-unknown-1 only", got)
+	}
+	if msg, _ := payload["message"].(string); !strings.Contains(msg, "filtered 1") {
+		t.Fatalf("message = %q, want filtered 1", msg)
 	}
 }
 
