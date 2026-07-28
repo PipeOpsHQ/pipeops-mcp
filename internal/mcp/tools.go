@@ -276,7 +276,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "update_project",
-				Description: "Update project configuration",
+				Description: "Update project name and/or port via control-plane settings endpoints. Description is not supported by the API.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"project_id":    stringProperty("The project ID or UUID"),
 					"name":          stringProperty("Updated project name"),
@@ -316,7 +316,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "restart_project",
-				Description: "Restart a project",
+				Description: "Restart a project by triggering a redeploy (no dedicated /restart route)",
 				InputSchema: objectSchema(map[string]interface{}{
 					"project_id": stringProperty("The project ID or UUID to restart"),
 				}, "project_id"),
@@ -326,7 +326,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "stop_project",
-				Description: "Stop a project",
+				Description: "Stop a project by scaling replicas to 0 (dashboard pause semantics)",
 				InputSchema: objectSchema(map[string]interface{}{
 					"project_id": stringProperty("The project ID or UUID to stop"),
 				}, "project_id"),
@@ -780,11 +780,13 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "create_environment",
-				Description: "Create a new environment",
+				Description: "Create a new environment on a server/cluster. Requires name, workspace, and cluster_uuid (server_id alias). env_variables may be omitted and defaults to a placeholder so API validation passes.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"name":          stringProperty("The environment name"),
-					"workspace_id":  stringProperty("The workspace ID that owns the environment"),
-					"env_variables": envVariablesProperty("Optional environment variables to create with the environment"),
+					"name":           stringProperty("Environment name"),
+					"workspace_id":   stringProperty("Workspace ID or UUID that owns the environment"),
+					"cluster_uuid":   stringProperty("Server/cluster UUID to create the environment on (required by API)"),
+					"server_id":      stringProperty("Legacy alias for cluster_uuid"),
+					"env_variables":  envVariablesProperty("Optional env vars; when omitted a non-secret PLACEHOLDER=1 is sent so the API accepts the create"),
 				}, "name", "workspace_id"),
 			},
 			handler: s.createEnvironmentTool,
@@ -920,9 +922,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "create_workspace",
-				Description: "Create a new workspace",
+				Description: "Create a new workspace. Name must be 5-25 letters only (API: min=5,max=25,alpha). Unpaid Nova usage can block create with 402.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"name":        stringProperty("The workspace name"),
+					"name":        stringProperty("Workspace name (5-25 alphabetic characters)"),
 					"description": stringProperty("Optional workspace description"),
 					"team_id":     stringProperty("Optional team ID to associate with the workspace"),
 				}, "name"),
@@ -1052,9 +1054,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_addon_deployment",
-				Description: "Get detailed information about an add-on deployment",
+				Description: "Get detailed information about an add-on deployment (resolved from workspace deployments overview)",
 				InputSchema: objectSchema(map[string]interface{}{
 					"deployment_id": stringProperty("The add-on deployment ID or UUID"),
+					"workspace_id":  stringProperty("Workspace ID or UUID (required for multi-workspace accounts)"),
 				}, "deployment_id"),
 			},
 			handler: s.getAddOnDeploymentTool,
@@ -1072,9 +1075,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "view_addon_deployment_configs",
-				Description: "View configuration for an add-on deployment",
+				Description: "View configuration for an add-on deployment. Requires workspace_id (API middleware needs workspace query).",
 				InputSchema: objectSchema(map[string]interface{}{
 					"deployment_id": stringProperty("The add-on deployment ID or UUID"),
+					"workspace_id":  stringProperty("Workspace ID or UUID (required by API)"),
 				}, "deployment_id"),
 			},
 			handler: s.viewAddOnDeploymentConfigsTool,
@@ -4525,11 +4529,15 @@ func (s *Server) restartProjectTool(ctx context.Context, args map[string]interfa
 	if err != nil {
 		return nil, err
 	}
-
-	if _, err := s.client.Projects.Restart(ctx, projectID); err != nil {
+	// Control plane has no /restart route; thin redeploy rolls the deployment.
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w", err)
+	}
+	if _, err := s.client.Projects.Restart(ctx, projectID, &pipeops.ProjectDeployOptions{WorkspaceUUID: workspaceUUID}); err != nil {
 		return nil, err
 	}
-	return textResult("Project restarted successfully"), nil
+	return textResult("Project restart triggered (redeploy)"), nil
 }
 
 func (s *Server) stopProjectTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -4537,11 +4545,11 @@ func (s *Server) stopProjectTool(ctx context.Context, args map[string]interface{
 	if err != nil {
 		return nil, err
 	}
-
+	// Control plane has no /stop route; scaling replicas to 0 pauses the app.
 	if _, err := s.client.Projects.Stop(ctx, projectID); err != nil {
 		return nil, err
 	}
-	return textResult("Project stopped successfully"), nil
+	return textResult("Project stop triggered (replicas scaled to 0)"), nil
 }
 
 func (s *Server) getProjectLogsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
@@ -5790,14 +5798,39 @@ func (s *Server) createEnvironmentTool(ctx context.Context, args map[string]inte
 		return nil, fmt.Errorf("name is required")
 	}
 	if req.WorkspaceID == "" {
+		// accept workspace_uuid as alias
+		req.WorkspaceID = firstNonEmptyString(
+			optionalStringArg(args, "workspace_id"),
+			optionalStringArg(args, "workspace_uuid"),
+		)
+	}
+	if req.WorkspaceID == "" {
 		return nil, fmt.Errorf("workspace_id is required")
 	}
+	// API requires cluster_uuid; accept server_id alias.
+	clusterUUID := firstNonEmptyString(
+		strings.TrimSpace(req.ClusterUUID),
+		optionalStringArg(args, "cluster_uuid"),
+		optionalStringArg(args, "server_id"),
+		optionalStringArg(args, "clusterUUID"),
+	)
+	if clusterUUID == "" {
+		return nil, fmt.Errorf("cluster_uuid is required (server_id is accepted as a legacy alias)")
+	}
+	req.ClusterUUID = clusterUUID
 
 	workspaceUUID, err := s.resolveWorkspaceUUID(ctx, req.WorkspaceID)
 	if err != nil {
 		return nil, err
 	}
 	req.WorkspaceUUID = workspaceUUID
+	req.WorkspaceID = workspaceUUID
+
+	// API validates env_variables as required with non-empty dive; default a
+	// harmless marker when the client omits them.
+	if len(req.EnvVariables) == 0 {
+		req.EnvVariables = []pipeops.EnvVariable{{Key: "PIPEOPS_ENV", Value: "1"}}
+	}
 
 	resp, _, err := s.client.Environments.Create(ctx, &req)
 	if err != nil {
@@ -6000,9 +6033,20 @@ func (s *Server) createWorkspaceTool(ctx context.Context, args map[string]interf
 	if err := decodeArguments(args, &req); err != nil {
 		return nil, err
 	}
-	if req.Name == "" {
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
 		return nil, fmt.Errorf("name is required")
 	}
+	// Control plane: validate:"required,min=5,max=25,alpha"
+	if len(name) < 5 || len(name) > 25 {
+		return nil, fmt.Errorf("workspace name must be 5-25 characters (got %d)", len(name))
+	}
+	for _, r := range name {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') {
+			return nil, fmt.Errorf("workspace name must be alphabetic only (API alpha constraint)")
+		}
+	}
+	req.Name = name
 
 	resp, _, err := s.client.Workspaces.Create(ctx, &req)
 	if err != nil {
@@ -6197,8 +6241,11 @@ func (s *Server) getAddOnDeploymentTool(ctx context.Context, args map[string]int
 	if err != nil {
 		return nil, err
 	}
-
-	resp, _, err := s.client.AddOns.GetDeployment(ctx, deploymentID)
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w", err)
+	}
+	resp, _, err := s.client.AddOns.GetDeployment(ctx, deploymentID, &pipeops.ListDeploymentsOptions{WorkspaceUUID: workspaceUUID})
 	if err != nil {
 		return nil, err
 	}
@@ -6229,8 +6276,11 @@ func (s *Server) viewAddOnDeploymentConfigsTool(ctx context.Context, args map[st
 	if req.DeploymentID == "" {
 		return nil, fmt.Errorf("deployment_id is required")
 	}
-
-	resp, _, err := s.client.AddOns.ViewDeploymentConfigs(ctx, req.DeploymentID)
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w (API requires workspace query for configs)", err)
+	}
+	resp, _, err := s.client.AddOns.ViewDeploymentConfigs(ctx, req.DeploymentID, &pipeops.ViewDeploymentConfigsOptions{WorkspaceUUID: workspaceUUID})
 	if err != nil {
 		return nil, err
 	}
