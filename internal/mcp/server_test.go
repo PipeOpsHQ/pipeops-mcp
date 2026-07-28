@@ -1458,6 +1458,9 @@ func TestCreateEnvironmentToolResolvesWorkspaceUUIDFromID(t *testing.T) {
 				if got := payload["workspace_uuid"]; got != "ws_env_uuid" {
 					t.Fatalf("workspace_uuid body = %#v, want %q", got, "ws_env_uuid")
 				}
+				if got := payload["cluster_uuid"]; got != "cluster-1" {
+					t.Fatalf("cluster_uuid body = %#v, want %q", got, "cluster-1")
+				}
 				return jsonHTTPResponse(r, http.StatusOK, `{"status":"success","message":"ok","data":{"environment":{"uuid":"env1","name":"prod"}}}`), nil
 			default:
 				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
@@ -1467,7 +1470,9 @@ func TestCreateEnvironmentToolResolvesWorkspaceUUIDFromID(t *testing.T) {
 	})
 
 	server := &Server{client: client}
-	result, err := server.createEnvironmentTool(context.Background(), map[string]interface{}{"name": "prod", "workspace_id": "1"})
+	result, err := server.createEnvironmentTool(context.Background(), map[string]interface{}{
+		"name": "prod", "workspace_id": "1", "cluster_uuid": "cluster-1",
+	})
 	if err != nil {
 		t.Fatalf("createEnvironmentTool error: %v", err)
 	}
