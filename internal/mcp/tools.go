@@ -1306,6 +1306,46 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
+				Name: "exec_in_sandbox",
+				Description: "Run a non-interactive shell command inside a running sandbox via the PipeOps BFF (no terminal session needed). " +
+					"Returns stdout, stderr, combined output, and exit_code. Sandbox must be running. Prefer short commands; default timeout 60s (max 300s).",
+				InputSchema: objectSchema(map[string]interface{}{
+					"sandbox_id":      stringProperty("Sandbox / container id"),
+					"command":         stringProperty("Shell command to run (e.g. 'ls -la /home')"),
+					"workdir":         stringProperty("Optional working directory inside the sandbox"),
+					"timeout_seconds": numberProperty("Optional timeout in seconds (default 60, max 300)"),
+					"workspace_id":    stringProperty("Optional workspace ID or UUID override"),
+				}, "sandbox_id", "command"),
+			},
+			handler: s.execInSandboxTool,
+		},
+		{
+			tool: Tool{
+				Name:        "list_sandbox_files",
+				Description: "List files/directories inside a running sandbox. Default path is /home/user. Use before read_sandbox_file.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"sandbox_id":   stringProperty("Sandbox / container id"),
+					"path":         stringProperty("Directory path inside the sandbox (default /home/user)"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "sandbox_id"),
+			},
+			handler: s.listSandboxFilesTool,
+		},
+		{
+			tool: Tool{
+				Name: "read_sandbox_file",
+				Description: "Read a file from a running sandbox. Returns content as UTF-8 text or base64 (see encoding field). " +
+					"Size is capped (~2 MiB); truncated=true if truncated. Prefer list_sandbox_files first for paths.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"sandbox_id":   stringProperty("Sandbox / container id"),
+					"path":         stringProperty("Absolute file path inside the sandbox (e.g. /home/user/app.go)"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "sandbox_id", "path"),
+			},
+			handler: s.readSandboxFileTool,
+		},
+		{
+			tool: Tool{
 				Name:        "get_sandbox_usage",
 				Description: "Daily sandbox usage rollups for a workspace (from/to as YYYY-MM-DD)",
 				InputSchema: objectSchema(map[string]interface{}{
@@ -2851,6 +2891,20 @@ type sandboxUsageArgs struct {
 	WorkspaceID string `json:"workspace_id,omitempty"`
 	From        string `json:"from,omitempty"`
 	To          string `json:"to,omitempty"`
+}
+
+type execInSandboxArgs struct {
+	SandboxID      string `json:"sandbox_id"`
+	Command        string `json:"command"`
+	WorkDir        string `json:"workdir,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+}
+
+type sandboxFilesArgs struct {
+	SandboxID   string `json:"sandbox_id"`
+	Path        string `json:"path,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 type listVolumesArgs struct {
@@ -6900,6 +6954,74 @@ func (s *Server) createSandboxSessionTool(ctx context.Context, args map[string]i
 		return nil, err
 	}
 	resp, _, err := s.client.Sandboxes.CreateSession(ctx, req.SandboxID, opts)
+	if err != nil {
+		return nil, formatToolCallError(err)
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) execInSandboxTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req execInSandboxArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	if strings.TrimSpace(req.Command) == "" {
+		return nil, fmt.Errorf("command is required")
+	}
+	opts, err := s.sandboxWorkspaceOpts(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	body := &pipeops.ExecSandboxRequest{
+		Command:        strings.TrimSpace(req.Command),
+		WorkDir:        strings.TrimSpace(req.WorkDir),
+		TimeoutSeconds: req.TimeoutSeconds,
+	}
+	resp, _, err := s.client.Sandboxes.Exec(ctx, req.SandboxID, opts, body)
+	if err != nil {
+		return nil, formatToolCallError(err)
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) listSandboxFilesTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req sandboxFilesArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	opts, err := s.sandboxWorkspaceOpts(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	resp, _, err := s.client.Sandboxes.ListFiles(ctx, req.SandboxID, strings.TrimSpace(req.Path), opts)
+	if err != nil {
+		return nil, formatToolCallError(err)
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) readSandboxFileTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req sandboxFilesArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		return nil, fmt.Errorf("path is required")
+	}
+	opts, err := s.sandboxWorkspaceOpts(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	resp, _, err := s.client.Sandboxes.ReadFile(ctx, req.SandboxID, strings.TrimSpace(req.Path), opts)
 	if err != nil {
 		return nil, formatToolCallError(err)
 	}
