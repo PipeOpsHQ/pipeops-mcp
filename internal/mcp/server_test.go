@@ -144,6 +144,15 @@ func TestHandleToolsList(t *testing.T) {
 		"create_service_account_token",
 		"update_service_account_token",
 		"revoke_service_account_token",
+		"list_sandboxes",
+		"get_sandbox",
+		"create_sandbox",
+		"start_sandbox",
+		"stop_sandbox",
+		"restart_sandbox",
+		"delete_sandbox",
+		"create_sandbox_session",
+		"get_sandbox_usage",
 	}
 
 	for _, expected := range expectedTools {

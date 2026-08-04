@@ -3,8 +3,9 @@ module github.com/PipeOpsHQ/pipeops-mcp
 go 1.25.0
 
 require (
-	github.com/PipeOpsHQ/pipeops-go-sdk v0.17.8
+	github.com/PipeOpsHQ/pipeops-go-sdk v0.18.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
+	github.com/posthog/posthog-go v1.17.5
 	github.com/redis/go-redis/v9 v9.17.2
 	modernc.org/sqlite v1.54.0
 )
@@ -22,7 +23,6 @@ require (
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
-	github.com/posthog/posthog-go v1.17.5 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/segmentio/asm v1.1.3 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect

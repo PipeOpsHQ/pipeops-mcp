@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/PipeOpsHQ/pipeops-go-sdk/pipeops"
 )
@@ -1213,6 +1214,107 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				}, "volume_uuid"),
 			},
 			handler: s.getVolumeExportTool,
+		},
+		{
+			tool: Tool{
+				Name:        "list_sandboxes",
+				Description: "List Rexec sandboxes for a workspace via the PipeOps BFF (not raw Rexec). Prefer a real workspace_id from list_workspaces.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
+				}),
+			},
+			handler: s.listSandboxesTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_sandbox",
+				Description: "Get one sandbox by id",
+				InputSchema: objectSchema(map[string]interface{}{
+					"sandbox_id":   stringProperty("Sandbox / container id"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "sandbox_id"),
+			},
+			handler: s.getSandboxTool,
+		},
+		{
+			tool: Tool{
+				Name:        "create_sandbox",
+				Description: "Create a sandbox (PipeOps BFF → Rexec). Empty name/image use server defaults.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"name":         stringProperty("Sandbox name"),
+					"image":        stringProperty("Container image (e.g. ubuntu)"),
+					"role":         stringProperty("Role/profile (e.g. standard)"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}),
+			},
+			handler: s.createSandboxTool,
+		},
+		{
+			tool: Tool{
+				Name:        "start_sandbox",
+				Description: "Start a stopped sandbox",
+				InputSchema: objectSchema(map[string]interface{}{
+					"sandbox_id":   stringProperty("Sandbox / container id"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "sandbox_id"),
+			},
+			handler: s.startSandboxTool,
+		},
+		{
+			tool: Tool{
+				Name:        "stop_sandbox",
+				Description: "Stop a running sandbox",
+				InputSchema: objectSchema(map[string]interface{}{
+					"sandbox_id":   stringProperty("Sandbox / container id"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "sandbox_id"),
+			},
+			handler: s.stopSandboxTool,
+		},
+		{
+			tool: Tool{
+				Name:        "restart_sandbox",
+				Description: "Restart a sandbox (stop then start)",
+				InputSchema: objectSchema(map[string]interface{}{
+					"sandbox_id":   stringProperty("Sandbox / container id"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "sandbox_id"),
+			},
+			handler: s.restartSandboxTool,
+		},
+		{
+			tool: Tool{
+				Name:        "delete_sandbox",
+				Description: "Delete a sandbox permanently",
+				InputSchema: objectSchema(map[string]interface{}{
+					"sandbox_id":   stringProperty("Sandbox / container id"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "sandbox_id"),
+			},
+			handler: s.deleteSandboxTool,
+		},
+		{
+			tool: Tool{
+				Name:        "create_sandbox_session",
+				Description: "Create a short-lived terminal/session grant for a sandbox (token is sensitive — do not log)",
+				InputSchema: objectSchema(map[string]interface{}{
+					"sandbox_id":   stringProperty("Sandbox / container id"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "sandbox_id"),
+			},
+			handler: s.createSandboxSessionTool,
+		},
+		{
+			tool: Tool{
+				Name:        "get_sandbox_usage",
+				Description: "Daily sandbox usage rollups for a workspace (from/to as YYYY-MM-DD)",
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+					"from":         stringProperty("Start day YYYY-MM-DD"),
+					"to":           stringProperty("End day YYYY-MM-DD"),
+				}),
+			},
+			handler: s.getSandboxUsageTool,
 		},
 		{
 			tool: Tool{
@@ -2727,6 +2829,28 @@ type listAddOnsArgs struct {
 	Search      string `json:"search,omitempty"`
 	Featured    *bool  `json:"featured,omitempty"`
 	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type listSandboxesArgs struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type sandboxIDArgs struct {
+	SandboxID   string `json:"sandbox_id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type createSandboxArgs struct {
+	Name        string `json:"name,omitempty"`
+	Image       string `json:"image,omitempty"`
+	Role        string `json:"role,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type sandboxUsageArgs struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	From        string `json:"from,omitempty"`
+	To          string `json:"to,omitempty"`
 }
 
 type listVolumesArgs struct {
@@ -6649,6 +6773,164 @@ func (s *Server) getVolumeExportTool(ctx context.Context, args map[string]interf
 	resp, _, err := s.client.Volumes.GetExport(ctx, req.VolumeUUID, opts)
 	if err != nil {
 		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) sandboxWorkspaceOpts(ctx context.Context, args map[string]interface{}) (*pipeops.SandboxWorkspaceOptions, error) {
+	ws, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return &pipeops.SandboxWorkspaceOptions{WorkspaceUUID: ws}, nil
+}
+
+func (s *Server) listSandboxesTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req listSandboxesArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	opts, err := s.sandboxWorkspaceOpts(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	resp, _, err := s.client.Sandboxes.List(ctx, opts)
+	if err != nil {
+		return nil, formatToolCallError(err)
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getSandboxTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req sandboxIDArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	opts, err := s.sandboxWorkspaceOpts(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	resp, _, err := s.client.Sandboxes.Get(ctx, req.SandboxID, opts)
+	if err != nil {
+		return nil, formatToolCallError(err)
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) createSandboxTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req createSandboxArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	opts, err := s.sandboxWorkspaceOpts(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	resp, _, err := s.client.Sandboxes.Create(ctx, opts, &pipeops.CreateSandboxRequest{
+		Name:  req.Name,
+		Image: req.Image,
+		Role:  req.Role,
+	})
+	if err != nil {
+		return nil, formatToolCallError(err)
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) startSandboxTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	return s.sandboxLifecycleTool(ctx, args, "start")
+}
+
+func (s *Server) stopSandboxTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	return s.sandboxLifecycleTool(ctx, args, "stop")
+}
+
+func (s *Server) restartSandboxTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	return s.sandboxLifecycleTool(ctx, args, "restart")
+}
+
+func (s *Server) deleteSandboxTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	return s.sandboxLifecycleTool(ctx, args, "delete")
+}
+
+func (s *Server) sandboxLifecycleTool(ctx context.Context, args map[string]interface{}, action string) (interface{}, error) {
+	var req sandboxIDArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	opts, err := s.sandboxWorkspaceOpts(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	var apiErr error
+	switch action {
+	case "start":
+		_, _, apiErr = s.client.Sandboxes.Start(ctx, req.SandboxID, opts)
+	case "stop":
+		_, _, apiErr = s.client.Sandboxes.Stop(ctx, req.SandboxID, opts)
+	case "restart":
+		_, _, apiErr = s.client.Sandboxes.Restart(ctx, req.SandboxID, opts)
+	case "delete":
+		_, _, apiErr = s.client.Sandboxes.Delete(ctx, req.SandboxID, opts)
+	default:
+		return nil, fmt.Errorf("unknown sandbox action %q", action)
+	}
+	if apiErr != nil {
+		return nil, formatToolCallError(apiErr)
+	}
+	return textResult(fmt.Sprintf("Sandbox %s %sed successfully", req.SandboxID, action)), nil
+}
+
+func (s *Server) createSandboxSessionTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req sandboxIDArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	opts, err := s.sandboxWorkspaceOpts(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	resp, _, err := s.client.Sandboxes.CreateSession(ctx, req.SandboxID, opts)
+	if err != nil {
+		return nil, formatToolCallError(err)
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getSandboxUsageTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req sandboxUsageArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	opts, err := s.sandboxWorkspaceOpts(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	var from, to time.Time
+	if strings.TrimSpace(req.From) != "" {
+		from, err = time.Parse("2006-01-02", strings.TrimSpace(req.From))
+		if err != nil {
+			return nil, fmt.Errorf("from must be YYYY-MM-DD: %w", err)
+		}
+	}
+	if strings.TrimSpace(req.To) != "" {
+		to, err = time.Parse("2006-01-02", strings.TrimSpace(req.To))
+		if err != nil {
+			return nil, fmt.Errorf("to must be YYYY-MM-DD: %w", err)
+		}
+	}
+	resp, _, err := s.client.Sandboxes.UsageDaily(ctx, opts, from, to)
+	if err != nil {
+		return nil, formatToolCallError(err)
 	}
 	return jsonResult(resp)
 }
