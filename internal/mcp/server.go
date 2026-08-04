@@ -7,14 +7,25 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/PipeOpsHQ/pipeops-go-sdk/pipeops"
+	"github.com/PipeOpsHQ/pipeops-mcp/internal/analytics"
 )
 
 // Server represents the MCP server.
 type Server struct {
 	client        *pipeops.Client
 	allowedScopes map[string]struct{}
+
+	// Analytics session metadata (stdio / long-lived connections).
+	analyticsMu     sync.Mutex
+	sessionID       string
+	clientName      string
+	clientVersion   string
+	protocolVersion string
+	distinctID      string
 }
 
 // NewServer creates a new MCP server.
@@ -172,7 +183,7 @@ func (s *Server) handleMessage(ctx context.Context, msg *Message) *Message {
 
 	switch msg.Method {
 	case "initialize":
-		response.Result = s.handleInitialize()
+		response.Result = s.handleInitialize(msg.Params)
 	case "notifications/initialized":
 		// Some clients send this as a request with an id; treat as success no-op.
 		response.Result = map[string]interface{}{}
@@ -181,8 +192,11 @@ func (s *Server) handleMessage(ctx context.Context, msg *Message) *Message {
 		response.Result = map[string]interface{}{}
 	case "tools/list":
 		response.Result = s.handleToolsList()
+		s.captureToolsList()
 	case "tools/call":
+		start := time.Now()
 		result, err := s.handleToolsCall(ctx, msg.Params)
+		s.captureToolCall(msg.Params, result, err, time.Since(start))
 		if err != nil {
 			response.Error = &RPCError{Code: -32000, Message: err.Error()}
 		} else {
@@ -208,7 +222,24 @@ func (s *Server) handleMessage(ctx context.Context, msg *Message) *Message {
 }
 
 // handleInitialize handles the initialize request.
-func (s *Server) handleInitialize() interface{} {
+func (s *Server) handleInitialize(params json.RawMessage) interface{} {
+	clientName, clientVersion, protocolVersion := parseInitializeParams(params)
+	s.analyticsMu.Lock()
+	if s.sessionID == "" {
+		s.sessionID = analytics.NewSessionID()
+	}
+	s.clientName = clientName
+	s.clientVersion = clientVersion
+	s.protocolVersion = protocolVersion
+	if s.protocolVersion == "" {
+		s.protocolVersion = "2024-11-05"
+	}
+	sessionID := s.sessionID
+	distinctID := s.distinctID
+	s.analyticsMu.Unlock()
+
+	analytics.Get().CaptureInitialize(sessionID, clientName, clientVersion, s.protocolVersionOrDefault(), distinctID)
+
 	return map[string]interface{}{
 		"protocolVersion": "2024-11-05",
 		"capabilities": map[string]interface{}{
@@ -216,9 +247,101 @@ func (s *Server) handleInitialize() interface{} {
 		},
 		"serverInfo": map[string]string{
 			"name":    "pipeops-mcp-server",
-			"version": "1.0.0",
+			"version": "1.1.0",
 		},
 	}
+}
+
+func parseInitializeParams(params json.RawMessage) (clientName, clientVersion, protocolVersion string) {
+	if len(params) == 0 {
+		return "", "", ""
+	}
+	var raw struct {
+		ProtocolVersion string `json:"protocolVersion"`
+		ClientInfo      *struct {
+			Name    string `json:"name"`
+			Version string `json:"version"`
+		} `json:"clientInfo"`
+	}
+	if err := json.Unmarshal(params, &raw); err != nil {
+		return "", "", ""
+	}
+	protocolVersion = raw.ProtocolVersion
+	if raw.ClientInfo != nil {
+		clientName = raw.ClientInfo.Name
+		clientVersion = raw.ClientInfo.Version
+	}
+	return clientName, clientVersion, protocolVersion
+}
+
+func (s *Server) protocolVersionOrDefault() string {
+	s.analyticsMu.Lock()
+	defer s.analyticsMu.Unlock()
+	if s.protocolVersion != "" {
+		return s.protocolVersion
+	}
+	return "2024-11-05"
+}
+
+func (s *Server) analyticsSession() (sessionID, clientName, clientVersion, protocolVersion, distinctID string) {
+	s.analyticsMu.Lock()
+	defer s.analyticsMu.Unlock()
+	if s.sessionID == "" {
+		s.sessionID = analytics.NewSessionID()
+	}
+	return s.sessionID, s.clientName, s.clientVersion, s.protocolVersionOrDefaultUnlocked(), s.distinctID
+}
+
+func (s *Server) protocolVersionOrDefaultUnlocked() string {
+	if s.protocolVersion != "" {
+		return s.protocolVersion
+	}
+	return "2024-11-05"
+}
+
+func (s *Server) captureToolsList() {
+	sessionID, clientName, clientVersion, protocolVersion, distinctID := s.analyticsSession()
+	names := make([]string, 0)
+	for _, definition := range s.toolDefinitions() {
+		if s.toolAllowed(definition.tool.Name) {
+			names = append(names, definition.tool.Name)
+		}
+	}
+	analytics.Get().CaptureToolsList(sessionID, clientName, clientVersion, protocolVersion, distinctID, names)
+}
+
+func (s *Server) captureToolCall(params json.RawMessage, result interface{}, err error, duration time.Duration) {
+	var callParams ToolCallParams
+	_ = json.Unmarshal(params, &callParams)
+	callParams.Name = normalizeLegacyToolName(callParams.Name)
+	sessionID, clientName, clientVersion, protocolVersion, distinctID := s.analyticsSession()
+
+	desc := ""
+	for _, definition := range s.toolDefinitions() {
+		if definition.tool.Name == callParams.Name {
+			desc = definition.tool.Description
+			break
+		}
+	}
+
+	ev := analytics.ToolCallEvent{
+		SessionID:       sessionID,
+		ClientName:      clientName,
+		ClientVersion:   clientVersion,
+		ProtocolVersion: protocolVersion,
+		DistinctID:      distinctID,
+		ToolName:        callParams.Name,
+		ToolDescription: desc,
+		Parameters:      callParams.Arguments,
+		Response:        result,
+		DurationMs:      duration.Milliseconds(),
+		IsError:         err != nil,
+	}
+	if err != nil {
+		ev.ErrorMessage = err.Error()
+		ev.Response = nil
+	}
+	analytics.Get().CaptureToolCall(ev)
 }
 
 // formatJSON formats an object as pretty-printed JSON.

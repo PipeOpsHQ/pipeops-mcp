@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	"github.com/PipeOpsHQ/pipeops-mcp/internal/analytics"
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -22,6 +25,9 @@ func (s *Server) newSDKServer() *sdkmcp.Server {
 			Sizes:    []string{"16x16"},
 		}},
 	}, nil)
+
+	// PostHog MCP Analytics for Streamable HTTP (initialize / tools/list / tools/call).
+	server.AddReceivingMiddleware(s.posthogReceivingMiddleware())
 
 	for _, definition := range s.toolDefinitions() {
 		definition := definition
@@ -47,7 +53,10 @@ func (s *Server) newSDKServer() *sdkmcp.Server {
 				}
 			}
 
+			start := time.Now()
 			result, err := definition.handler(ctx, arguments)
+			// Prefer handler-level capture for duration/response; middleware is backup for protocol methods.
+			s.captureSDKToolCall(request, definition.tool.Name, definition.tool.Description, arguments, result, err, time.Since(start))
 			if err != nil {
 				return toolErrorResult(err), nil
 			}
@@ -56,6 +65,115 @@ func (s *Server) newSDKServer() *sdkmcp.Server {
 	}
 
 	return server
+}
+
+func (s *Server) posthogReceivingMiddleware() sdkmcp.Middleware {
+	return func(next sdkmcp.MethodHandler) sdkmcp.MethodHandler {
+		return func(ctx context.Context, method string, req sdkmcp.Request) (sdkmcp.Result, error) {
+			start := time.Now()
+			result, err := next(ctx, method, req)
+			s.captureSDKMethod(ctx, method, req, result, err, time.Since(start))
+			return result, err
+		}
+	}
+}
+
+func (s *Server) captureSDKMethod(ctx context.Context, method string, req sdkmcp.Request, result sdkmcp.Result, err error, duration time.Duration) {
+	if !analytics.Get().Enabled() {
+		return
+	}
+	sessionID := sessionIDFromSDKRequest(req)
+	distinctID := distinctIDFromContext(ctx)
+	clientName, clientVersion, protocolVersion := clientMetaFromSDKRequest(req)
+
+	switch method {
+	case "initialize":
+		if initParams, ok := req.GetParams().(*sdkmcp.InitializeParams); ok && initParams != nil {
+			if initParams.ClientInfo != nil {
+				if initParams.ClientInfo.Name != "" {
+					clientName = initParams.ClientInfo.Name
+				}
+				if initParams.ClientInfo.Version != "" {
+					clientVersion = initParams.ClientInfo.Version
+				}
+			}
+			if initParams.ProtocolVersion != "" {
+				protocolVersion = initParams.ProtocolVersion
+			}
+		}
+		analytics.Get().CaptureInitialize(sessionID, clientName, clientVersion, protocolVersion, distinctID)
+	case "tools/list":
+		names := make([]string, 0)
+		for _, definition := range s.toolDefinitions() {
+			if s.toolAllowed(definition.tool.Name) {
+				names = append(names, definition.tool.Name)
+			}
+		}
+		analytics.Get().CaptureToolsList(sessionID, clientName, clientVersion, protocolVersion, distinctID, names)
+	case "tools/call":
+		// Tool calls are captured in the AddTool wrapper (richer payload).
+		_ = duration
+		_ = result
+		_ = err
+	}
+}
+
+func (s *Server) captureSDKToolCall(request *sdkmcp.CallToolRequest, name, description string, arguments map[string]interface{}, result interface{}, err error, duration time.Duration) {
+	if !analytics.Get().Enabled() {
+		return
+	}
+	sessionID := ""
+	distinctID := ""
+	if request != nil {
+		sessionID = sessionIDFromSDKRequest(request)
+		if request.Extra != nil && request.Extra.TokenInfo != nil {
+			distinctID = request.Extra.TokenInfo.UserID
+		}
+	}
+	ev := analytics.ToolCallEvent{
+		SessionID:       sessionID,
+		DistinctID:      distinctID,
+		ToolName:        name,
+		ToolDescription: description,
+		Parameters:      arguments,
+		Response:        result,
+		DurationMs:      duration.Milliseconds(),
+		IsError:         err != nil,
+	}
+	if err != nil {
+		ev.ErrorMessage = err.Error()
+		ev.Response = nil
+	}
+	analytics.Get().CaptureToolCall(ev)
+}
+
+func sessionIDFromSDKRequest(req sdkmcp.Request) string {
+	if req == nil {
+		return analytics.NewSessionID()
+	}
+	sess := req.GetSession()
+	if sess == nil {
+		return analytics.NewSessionID()
+	}
+	if id := sess.ID(); id != "" {
+		return analytics.SessionIDFromMCP(id)
+	}
+	return analytics.NewSessionID()
+}
+
+func clientMetaFromSDKRequest(req sdkmcp.Request) (name, version, protocol string) {
+	// Best-effort; initialize path fills richer fields from params.
+	return "", "", "2024-11-05"
+}
+
+func distinctIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	if info := auth.TokenInfoFromContext(ctx); info != nil && info.UserID != "" {
+		return info.UserID
+	}
+	return ""
 }
 
 func convertLegacyToolResult(result interface{}) (*sdkmcp.CallToolResult, error) {
