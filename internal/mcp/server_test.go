@@ -152,6 +152,7 @@ func TestHandleToolsList(t *testing.T) {
 		"restart_sandbox",
 		"delete_sandbox",
 		"create_sandbox_session",
+		"exec_in_sandbox",
 		"get_sandbox_usage",
 	}
 

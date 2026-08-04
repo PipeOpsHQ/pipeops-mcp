@@ -1306,6 +1306,21 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
+				Name: "exec_in_sandbox",
+				Description: "Run a non-interactive shell command inside a running sandbox via the PipeOps BFF (no terminal session needed). " +
+					"Returns stdout, stderr, combined output, and exit_code. Sandbox must be running. Prefer short commands; default timeout 60s (max 300s).",
+				InputSchema: objectSchema(map[string]interface{}{
+					"sandbox_id":      stringProperty("Sandbox / container id"),
+					"command":         stringProperty("Shell command to run (e.g. 'ls -la /home')"),
+					"workdir":         stringProperty("Optional working directory inside the sandbox"),
+					"timeout_seconds": numberProperty("Optional timeout in seconds (default 60, max 300)"),
+					"workspace_id":    stringProperty("Optional workspace ID or UUID override"),
+				}, "sandbox_id", "command"),
+			},
+			handler: s.execInSandboxTool,
+		},
+		{
+			tool: Tool{
 				Name:        "get_sandbox_usage",
 				Description: "Daily sandbox usage rollups for a workspace (from/to as YYYY-MM-DD)",
 				InputSchema: objectSchema(map[string]interface{}{
@@ -2851,6 +2866,14 @@ type sandboxUsageArgs struct {
 	WorkspaceID string `json:"workspace_id,omitempty"`
 	From        string `json:"from,omitempty"`
 	To          string `json:"to,omitempty"`
+}
+
+type execInSandboxArgs struct {
+	SandboxID      string `json:"sandbox_id"`
+	Command        string `json:"command"`
+	WorkDir        string `json:"workdir,omitempty"`
+	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
+	WorkspaceID    string `json:"workspace_id,omitempty"`
 }
 
 type listVolumesArgs struct {
@@ -6900,6 +6923,33 @@ func (s *Server) createSandboxSessionTool(ctx context.Context, args map[string]i
 		return nil, err
 	}
 	resp, _, err := s.client.Sandboxes.CreateSession(ctx, req.SandboxID, opts)
+	if err != nil {
+		return nil, formatToolCallError(err)
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) execInSandboxTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req execInSandboxArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.SandboxID) == "" {
+		return nil, fmt.Errorf("sandbox_id is required")
+	}
+	if strings.TrimSpace(req.Command) == "" {
+		return nil, fmt.Errorf("command is required")
+	}
+	opts, err := s.sandboxWorkspaceOpts(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	body := &pipeops.ExecSandboxRequest{
+		Command:        strings.TrimSpace(req.Command),
+		WorkDir:        strings.TrimSpace(req.WorkDir),
+		TimeoutSeconds: req.TimeoutSeconds,
+	}
+	resp, _, err := s.client.Sandboxes.Exec(ctx, req.SandboxID, opts, body)
 	if err != nil {
 		return nil, formatToolCallError(err)
 	}

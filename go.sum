@@ -1,5 +1,5 @@
-github.com/PipeOpsHQ/pipeops-go-sdk v0.18.0 h1:AD1SBAr1YbfKz8/HilxPswRMmsVbgBtFUdKRu6O5utM=
-github.com/PipeOpsHQ/pipeops-go-sdk v0.18.0/go.mod h1:06tq3WBPqAYhzmRErIlN6GMFN+jxDinMUDThl5DrM7E=
+github.com/PipeOpsHQ/pipeops-go-sdk v0.18.1-0.20260804093637-e878595c0292 h1:g0j5BulvYAas5QRP/Nj4EfRRHLztkVbWsgAl0Wq/kwk=
+github.com/PipeOpsHQ/pipeops-go-sdk v0.18.1-0.20260804093637-e878595c0292/go.mod h1:06tq3WBPqAYhzmRErIlN6GMFN+jxDinMUDThl5DrM7E=
 github.com/andybalholm/brotli v1.1.1 h1:PR2pgnyFznKEugtsUo0xLdDop5SKXd5Qf5ysW+7XdTA=
 github.com/andybalholm/brotli v1.1.1/go.mod h1:05ib4cKhjx3OQYUY22hTVd34Bc8upXjOLL2rKwwZBoA=
 github.com/bsm/ginkgo/v2 v2.12.0 h1:Ny8MWAHyOepLGlLKYmXG4IEkioBysk6GpaRTLC8zwWs=
