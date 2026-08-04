@@ -45,7 +45,6 @@ type listGitOpsApplicationsArgs struct {
 	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
-
 type createGitOpsApplicationArgs struct {
 	Name                string `json:"name"`
 	RepoURL             string `json:"repo_url"`
@@ -93,7 +92,6 @@ type listProjectGroupsArgs struct {
 	Limit       int    `json:"limit,omitempty"`
 	Offset      int    `json:"offset,omitempty"`
 }
-
 
 type createProjectGroupArgs struct {
 	Name                   string `json:"name"`
@@ -184,7 +182,6 @@ func gitOpsAutomatedSyncPolicy(prune, selfHeal, allowEmpty *bool) *pipeops.GitOp
 	}
 	return &pipeops.GitOpsSyncPolicyRequest{Automated: automated}
 }
-
 
 func (s *Server) toolDefinitions() []toolDefinition {
 	return []toolDefinition{
@@ -355,12 +352,12 @@ func (s *Server) toolDefinitions() []toolDefinition {
 					"same source as the dashboard Build Logs tab). Prefer this for MCP after create/deploy. " +
 					"Defaults to the latest deployment when deployment_uuid/build_sha are omitted.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"project_id":       stringProperty("The project ID or UUID"),
-					"workspace_id":     stringProperty("Optional workspace ID or UUID"),
-					"deployment_uuid":  stringProperty("Optional deployment UUID (default: latest)"),
-					"build_sha":        stringProperty("Optional build SHA (default: from deployment)"),
-					"stage":            stringProperty("Optional stage filter: git, build, or deploy"),
-					"limit":            integerProperty("Max log lines (default 2000, max 5000)"),
+					"project_id":      stringProperty("The project ID or UUID"),
+					"workspace_id":    stringProperty("Optional workspace ID or UUID"),
+					"deployment_uuid": stringProperty("Optional deployment UUID (default: latest)"),
+					"build_sha":       stringProperty("Optional build SHA (default: from deployment)"),
+					"stage":           stringProperty("Optional stage filter: git, build, or deploy"),
+					"limit":           integerProperty("Max log lines (default 2000, max 5000)"),
 				}, "project_id"),
 			},
 			handler: s.getProjectBuildLogsTool,
@@ -783,11 +780,11 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				Name:        "create_environment",
 				Description: "Create a new environment on a server/cluster. Requires name, workspace, and cluster_uuid (server_id alias). env_variables may be omitted and defaults to a placeholder so API validation passes.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"name":           stringProperty("Environment name"),
-					"workspace_id":   stringProperty("Workspace ID or UUID that owns the environment"),
-					"cluster_uuid":   stringProperty("Server/cluster UUID to create the environment on (required by API)"),
-					"server_id":      stringProperty("Legacy alias for cluster_uuid"),
-					"env_variables":  envVariablesProperty("Optional env vars; when omitted a non-secret PLACEHOLDER=1 is sent so the API accepts the create"),
+					"name":          stringProperty("Environment name"),
+					"workspace_id":  stringProperty("Workspace ID or UUID that owns the environment"),
+					"cluster_uuid":  stringProperty("Server/cluster UUID to create the environment on (required by API)"),
+					"server_id":     stringProperty("Legacy alias for cluster_uuid"),
+					"env_variables": envVariablesProperty("Optional env vars; when omitted a non-secret PLACEHOLDER=1 is sent so the API accepts the create"),
 				}, "name", "workspace_id"),
 			},
 			handler: s.createEnvironmentTool,
@@ -1825,7 +1822,46 @@ func formatToolCallError(err error) error {
 	if strings.Contains(msg, " 401 ") || strings.Contains(msg, "invalid or missing authentication") || strings.Contains(msg, "cookie token is empty") {
 		return fmt.Errorf("%w — Not authenticated. Export PIPEOPS_TOKEN=sat_… or complete MCP OAuth before calling tools", err)
 	}
+	if isHTMLErrorBody(msg) && (strings.Contains(msg, " 403 ") || strings.Contains(msg, ": 403")) {
+		return fmt.Errorf("%w — API returned HTML (not JSON), usually Cloudflare/WAF blocking or a dead edge path. Retry with a browser-authenticated OAuth session (not sat_ alone for /billing/*), confirm workspace_uuid via list_workspaces, and avoid invented UUIDs", err)
+	}
+	if strings.Contains(strings.ToLower(msg), "workspace with uuid not found") {
+		return fmt.Errorf("%w — That workspace is not owned by the current user (team workspaces need team_uuid) or does not exist. Call list_workspaces and use a UUID from that list", err)
+	}
 	return err
+}
+
+// isHTMLErrorBody detects CDN/SPA error pages mis-surfaced as API failures.
+func isHTMLErrorBody(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "<!doctype html") ||
+		strings.Contains(lower, "<html") ||
+		strings.Contains(lower, "page not found") ||
+		strings.Contains(lower, "cloudflare")
+}
+
+// formatBillingError adds billing-route-specific guidance (JWT+session only).
+func formatBillingError(err error, workspaceUUID string) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	base := formatToolCallError(err)
+	// /billing/* is DirectionUser only — service-account tokens (sat_) are rejected.
+	if strings.Contains(msg, " 401 ") || strings.Contains(msg, "unauthorized") || strings.Contains(msg, "direction") {
+		return fmt.Errorf("%w — Billing routes require a user OAuth/JWT session (dashboard or pipeops login). Service tokens (sat_) are not accepted on /billing/*", base)
+	}
+	if strings.Contains(msg, " 403 ") || strings.Contains(strings.ToLower(msg), "not enough permission") {
+		hint := "Billing access denied"
+		if workspaceUUID != "" {
+			hint += " for workspace " + workspaceUUID
+		}
+		return fmt.Errorf("%w — %s. Confirm the workspace is yours via list_workspaces; team members must pass team_uuid for non-owned workspaces", base, hint)
+	}
+	if strings.Contains(strings.ToLower(msg), "invalid workspace") || strings.Contains(strings.ToLower(msg), "workspace required") {
+		return fmt.Errorf("%w — Pass a valid workspace_id from list_workspaces (billing requires workspace_uuid)", base)
+	}
+	return base
 }
 
 func emptySchema() map[string]interface{} {
@@ -2440,7 +2476,11 @@ func withNovaClusterCostAllocationQuery(path, workspaceUUID, aggregate, window, 
 
 func (s *Server) requestBillingJSONWithWorkspaceFallback(ctx context.Context, method, path string, args map[string]interface{}, body interface{}, workspaceUUID *string) (map[string]interface{}, error) {
 	if workspaceUUID != nil && *workspaceUUID != "" {
-		return s.requestJSON(ctx, method, withWorkspaceUUIDQuery(path, *workspaceUUID), body)
+		resp, err := s.requestJSON(ctx, method, withWorkspaceUUIDQuery(path, *workspaceUUID), body)
+		if err != nil {
+			return nil, formatBillingError(err, *workspaceUUID)
+		}
+		return resp, nil
 	}
 
 	if workspaceID, ok := args["workspace_id"].(string); ok && strings.TrimSpace(workspaceID) != "" {
@@ -2451,12 +2491,19 @@ func (s *Server) requestBillingJSONWithWorkspaceFallback(ctx context.Context, me
 		if workspaceUUID != nil {
 			*workspaceUUID = resolvedWorkspaceUUID
 		}
-		return s.requestJSON(ctx, method, withWorkspaceUUIDQuery(path, resolvedWorkspaceUUID), body)
+		resp, err := s.requestJSON(ctx, method, withWorkspaceUUIDQuery(path, resolvedWorkspaceUUID), body)
+		if err != nil {
+			return nil, formatBillingError(err, resolvedWorkspaceUUID)
+		}
+		return resp, nil
 	}
 
 	resp, err := s.requestJSON(ctx, method, path, body)
-	if err == nil || !isBillingWorkspaceRequiredError(err) {
-		return resp, err
+	if err == nil {
+		return resp, nil
+	}
+	if !isBillingWorkspaceRequiredError(err) {
+		return nil, formatBillingError(err, "")
 	}
 
 	resolvedWorkspaceUUID, resolveErr := s.resolveDefaultWorkspaceUUID(ctx, args)
@@ -2466,7 +2513,11 @@ func (s *Server) requestBillingJSONWithWorkspaceFallback(ctx context.Context, me
 	if workspaceUUID != nil {
 		*workspaceUUID = resolvedWorkspaceUUID
 	}
-	return s.requestJSON(ctx, method, withWorkspaceUUIDQuery(path, resolvedWorkspaceUUID), body)
+	resp, err = s.requestJSON(ctx, method, withWorkspaceUUIDQuery(path, resolvedWorkspaceUUID), body)
+	if err != nil {
+		return nil, formatBillingError(err, resolvedWorkspaceUUID)
+	}
+	return resp, nil
 }
 
 func normalizeCollectionResponse(resp map[string]interface{}, key string) map[string]interface{} {
@@ -5856,7 +5907,6 @@ func (s *Server) listEnvironmentsForWorkspace(ctx context.Context, workspaceID s
 	}, nil
 }
 
-
 func findEnvironmentInListResponse(listed map[string]interface{}, environmentID string) map[string]interface{} {
 	environmentID = strings.TrimSpace(environmentID)
 	if listed == nil || environmentID == "" {
@@ -6217,7 +6267,7 @@ func (s *Server) getWorkspaceTool(ctx context.Context, args map[string]interface
 
 	resp, _, err := s.client.Workspaces.Get(ctx, workspaceID)
 	if err != nil {
-		return nil, err
+		return nil, formatToolCallError(err)
 	}
 	return jsonResult(resp)
 }
