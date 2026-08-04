@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/PipeOpsHQ/pipeops-mcp/internal/analytics"
 	"github.com/PipeOpsHQ/pipeops-mcp/internal/mcp"
 )
 
@@ -26,6 +27,14 @@ func run() error {
 	// Setup context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// PostHog MCP Analytics (project 15061). No-op unless POSTHOG_API_KEY is set.
+	if _, err := analytics.InitFromEnv(); err != nil {
+		return fmt.Errorf("posthog analytics: %w", err)
+	}
+	defer func() {
+		_ = analytics.CloseGlobal()
+	}()
 
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)

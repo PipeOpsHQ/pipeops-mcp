@@ -14,7 +14,7 @@ import (
 
 func TestHandleInitialize(t *testing.T) {
 	server := &Server{}
-	result := server.handleInitialize()
+	result := server.handleInitialize(nil)
 
 	resultMap, ok := result.(map[string]interface{})
 	if !ok {
