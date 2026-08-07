@@ -49,6 +49,7 @@ type listGitOpsApplicationsArgs struct {
 type createGitOpsApplicationArgs struct {
 	Name                string `json:"name"`
 	RepoURL             string `json:"repo_url"`
+	WorkspaceID         string `json:"workspace_id,omitempty"`
 	ProjectID           *uint  `json:"project_id,omitempty"`
 	EnvironmentID       *uint  `json:"environment_id,omitempty"`
 	Branch              string `json:"branch,omitempty"`
@@ -792,8 +793,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
-				Name:        "update_environment",
-				Description: "Update an environment",
+				Name: "update_environment",
+				Description: "Update an environment name. Note: the control plane currently disables " +
+					"PUT /environment/:uuid/update — this tool returns a clear unsupported error until re-enabled.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"environment_id": stringProperty("The environment ID or UUID"),
 					"name":           stringProperty("Updated environment name"),
@@ -878,8 +880,9 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
-				Name:        "list_team_members",
-				Description: "List members of a team",
+				Name: "list_team_members",
+				Description: "List members of a team (via GET /team/fetch/:uuid). " +
+					"Use the returned member user UUID (not email) for remove_team_member / update_team_member_role.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"team_id": stringProperty("The team ID or UUID"),
 				}, "team_id"),
@@ -888,23 +891,25 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
-				Name:        "remove_team_member",
-				Description: "Remove a member from a team",
+				Name: "remove_team_member",
+				Description: "Remove a member from a team. member_id must be the member's user UUID " +
+					"(from list_team_members / get_team), not an email address.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"team_id":   stringProperty("The team ID or UUID"),
-					"member_id": stringProperty("The member ID or UUID"),
+					"member_id": stringProperty("Member user UUID (not email)"),
 				}, "team_id", "member_id"),
 			},
 			handler: s.removeTeamMemberTool,
 		},
 		{
 			tool: Tool{
-				Name:        "update_team_member_role",
-				Description: "Update a team member role and permissions",
+				Name: "update_team_member_role",
+				Description: "Update a team member role. member_id must be the member's user UUID " +
+					"(from list_team_members / get_team), not an email address.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"team_id":     stringProperty("The team ID or UUID"),
-					"member_id":   stringProperty("The member ID or UUID"),
-					"role":        stringProperty("The new member role"),
+					"member_id":   stringProperty("Member user UUID (not email)"),
+					"role":        stringProperty("New role (e.g. admin, member)"),
 					"permissions": stringArrayProperty("Optional updated permissions"),
 				}, "team_id", "member_id", "role"),
 			},
@@ -1064,9 +1069,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_addon_deployment_session",
-				Description: "Get an add-on deployment session",
+				Description: "Get an add-on deployment session. Requires workspace_id (API middleware needs workspace query).",
 				InputSchema: objectSchema(map[string]interface{}{
-					"session_id": stringProperty("The deployment session ID"),
+					"session_id":   stringProperty("The deployment session ID"),
+					"workspace_id": stringProperty("Workspace ID or UUID (required by API)"),
 				}, "session_id"),
 			},
 			handler: s.getAddOnDeploymentSessionTool,
@@ -1521,10 +1527,11 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "create_gitops_application",
-				Description: "Create a GitOps application configuration",
+				Description: "Create a GitOps application configuration. Requires workspace_id (API scopes by workspace_uuid).",
 				InputSchema: objectSchema(map[string]interface{}{
 					"name":                  stringProperty("GitOps application name"),
 					"repo_url":              stringProperty("Git repository URL"),
+					"workspace_id":          stringProperty("Workspace ID or UUID (required)"),
 					"project_id":            integerProperty("Optional project ID to bind"),
 					"environment_id":        integerProperty("Optional environment ID to bind"),
 					"branch":                stringProperty("Optional git branch"),
@@ -1831,12 +1838,14 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "create_service_account_token",
-				Description: "Create a new service account token",
+				Description: "Create a new service account token. Requires workspace_id (controller binds tokens to a workspace).",
 				InputSchema: objectSchema(map[string]interface{}{
-					"name":        stringProperty("The service account token name"),
-					"description": stringProperty("Optional service account token description"),
-					"permissions": stringArrayProperty("Optional permissions for the token"),
-					"expires_at":  stringProperty("Optional token expiration timestamp"),
+					"name":         stringProperty("The service account token name"),
+					"workspace_id": stringProperty("Workspace ID or UUID (required)"),
+					"description":  stringProperty("Optional service account token description"),
+					"permissions":  stringArrayProperty("Optional permissions for the token"),
+					"expires_at":   stringProperty("Optional token expiration timestamp"),
+					"preset":       stringProperty("Optional preset: agent, ci, platform, mcp, sdk, sandbox, readonly"),
 				}, "name"),
 			},
 			handler: s.createServiceAccountTokenTool,
@@ -6623,8 +6632,12 @@ func (s *Server) getAddOnDeploymentSessionTool(ctx context.Context, args map[str
 	if req.SessionID == "" {
 		return nil, fmt.Errorf("session_id is required")
 	}
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w (API requires workspace query)", err)
+	}
 
-	resp, _, err := s.client.AddOns.GetDeploymentSession(ctx, req.SessionID)
+	resp, _, err := s.client.AddOns.GetDeploymentSession(ctx, req.SessionID, &pipeops.GetDeploymentSessionOptions{WorkspaceUUID: workspaceUUID})
 	if err != nil {
 		return nil, err
 	}
@@ -7350,6 +7363,24 @@ func (s *Server) createServiceAccountTokenTool(ctx context.Context, args map[str
 	if req.Name == "" {
 		return nil, fmt.Errorf("name is required")
 	}
+	if strings.TrimSpace(req.WorkspaceUUID) == "" {
+		if wid, ok := args["workspace_id"].(string); ok {
+			req.WorkspaceUUID = strings.TrimSpace(wid)
+		}
+	}
+	if strings.TrimSpace(req.WorkspaceUUID) == "" {
+		ws, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace: %w (pass workspace_id)", err)
+		}
+		req.WorkspaceUUID = ws
+	} else {
+		ws, err := s.resolveWorkspaceUUID(ctx, req.WorkspaceUUID)
+		if err != nil {
+			return nil, fmt.Errorf("resolve workspace: %w", err)
+		}
+		req.WorkspaceUUID = ws
+	}
 
 	resp, _, err := s.client.ServiceTokens.CreateServiceAccountToken(ctx, &req)
 	if err != nil {
@@ -7450,10 +7481,16 @@ func (s *Server) createGitOpsApplicationTool(ctx context.Context, args map[strin
 		return nil, fmt.Errorf("repo_url is required")
 	}
 
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w (pass workspace_id)", err)
+	}
+
 	resp, _, err := s.client.GitOps.Create(ctx, &pipeops.CreateGitOpsConfigRequest{
 		Name:                strings.TrimSpace(req.Name),
 		ProjectID:           req.ProjectID,
 		EnvironmentID:       req.EnvironmentID,
+		WorkspaceUUID:       workspaceUUID,
 		RepoURL:             strings.TrimSpace(req.RepoURL),
 		Branch:              strings.TrimSpace(req.Branch),
 		Path:                strings.TrimSpace(req.Path),
