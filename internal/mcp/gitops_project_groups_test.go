@@ -227,11 +227,18 @@ func TestCreateGitOpsApplicationTool(t *testing.T) {
 	}
 	client.SetHTTPClient(&http.Client{
 		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			// Workspace resolution may GET /workspace first; create is POST.
+			if r.Method == http.MethodGet && (r.URL.Path == "/workspace" || r.URL.Path == "/workspaces") {
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":[{"UUID":"ws-1","Name":"ws"}],"message":"ok","success":true}`), nil
+			}
 			if r.Method != http.MethodPost {
 				t.Fatalf("method = %s, want POST", r.Method)
 			}
 			if r.URL.Path != "/api/v1/gitops/applications" {
 				t.Fatalf("path = %s, want /api/v1/gitops/applications", r.URL.Path)
+			}
+			if got := r.URL.Query().Get("workspace_uuid"); got == "" {
+				t.Fatal("expected workspace_uuid query on create")
 			}
 			return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"uuid":"gitops-1","name":"demo","repo_url":"https://github.com/acme/demo.git"}}`), nil
 		}),
@@ -243,6 +250,7 @@ func TestCreateGitOpsApplicationTool(t *testing.T) {
 		"name":            "demo",
 		"repo_url":        "https://github.com/acme/demo.git",
 		"branch":          "main",
+		"workspace_id":    "ws-1",
 		"auto_sync_prune": prune,
 	})
 	if err != nil {
