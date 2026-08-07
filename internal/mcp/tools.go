@@ -672,20 +672,24 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "list_servers",
-				Description: "List all servers",
+				Description: "List all servers/clusters. Prefer this before get_server. Each item includes uuid (use as server_id) and workspace_id.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"workspace_id": stringProperty("Optional workspace ID to scope the server list"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID to scope the server list"),
 				}),
 			},
 			handler: s.listServersTool,
 		},
 		{
 			tool: Tool{
-				Name:        "get_server",
-				Description: "Get detailed information about a server",
+				Name: "get_server",
+				Description: "Get detailed information about a server/cluster. " +
+					"Pass server_id as the uuid from list_servers (preferred). " +
+					"Also accepts exact name/slug or numeric id. " +
+					"If lookup fails, call list_servers first — do not invent UUIDs.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"server_id":    stringProperty("The server ID or UUID"),
-					"workspace_id": stringProperty("Optional workspace ID to scope the server lookup"),
+					"server_id":    stringProperty("Server uuid from list_servers (preferred). Also accepts name, slug, numeric id, or cluster_id."),
+					"cluster_id":   stringProperty("Alias for server_id (cluster uuid)"),
+					"workspace_id": stringProperty("Optional workspace uuid from the same list_servers item (speeds up lookup; wrong value falls back to all workspaces)"),
 				}, "server_id"),
 			},
 			handler: s.getServerTool,
@@ -693,9 +697,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_server_connection",
-				Description: "Get connection information for a server",
+				Description: "Get connection information for a server. Use uuid from list_servers as server_id.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"server_id": stringProperty("The server ID or UUID"),
+					"server_id":  stringProperty("Server uuid from list_servers (preferred). Also accepts name/slug."),
+					"cluster_id": stringProperty("Alias for server_id"),
 				}, "server_id"),
 			},
 			handler: s.getClusterConnectionTool,
@@ -703,9 +708,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_server_cost_allocation",
-				Description: "Get compute cost allocation for a server",
+				Description: "Get compute cost allocation for a server. Use uuid from list_servers as server_id.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"server_id":    stringProperty("The server ID or UUID"),
+					"server_id":    stringProperty("Server uuid from list_servers (preferred)"),
+					"cluster_id":   stringProperty("Alias for server_id"),
 					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
 					"aggregate":    stringProperty("Optional cost aggregation, defaults to namespace"),
 					"window":       stringProperty("Optional time window such as 30d, defaults to 30d"),
@@ -1979,6 +1985,14 @@ func formatToolCallError(err error) error {
 	if strings.Contains(strings.ToLower(msg), "workspace with uuid not found") {
 		return fmt.Errorf("%w — That workspace is not owned by the current user (team workspaces need team_uuid) or does not exist. Call list_workspaces and use a UUID from that list", err)
 	}
+	// Bare not-found without guidance (legacy callers / SDK errors).
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "server ") && strings.Contains(lower, "not found") && !strings.Contains(lower, "list_servers") {
+		return fmt.Errorf("%w — call list_servers and pass the server's uuid (preferred) or exact name; include workspace_id from the same list item when known", err)
+	}
+	if strings.Contains(lower, "cluster ") && strings.Contains(lower, "not found") && !strings.Contains(lower, "list_servers") {
+		return fmt.Errorf("%w — call list_servers and pass the cluster/server uuid; do not invent identifiers", err)
+	}
 	return err
 }
 
@@ -2020,9 +2034,19 @@ func emptySchema() map[string]interface{} {
 }
 
 func objectSchema(properties map[string]interface{}, required ...string) map[string]interface{} {
+	// Copy so callers can reuse property maps without mutating shared state.
+	props := make(map[string]interface{}, len(properties)+1)
+	for k, v := range properties {
+		props[k] = v
+	}
+	// Optional natural-language goal for PostHog $mcp_intent (context_parameter).
+	// Agents rarely pass this unless it appears in the tool schema.
+	if _, ok := props["context"]; !ok {
+		props["context"] = stringProperty("Optional natural-language goal for this call (why you are invoking the tool). Improves analytics intent tracking; not sent to the PipeOps API.")
+	}
 	schema := map[string]interface{}{
 		"type":       "object",
-		"properties": properties,
+		"properties": props,
 	}
 	if len(required) > 0 {
 		schema["required"] = required
@@ -2035,6 +2059,35 @@ func stringProperty(description string) map[string]interface{} {
 		"type":        "string",
 		"description": description,
 	}
+}
+
+// requiredServerID accepts the common aliases agents invent for server/cluster IDs
+// and coerces non-string JSON values (e.g. numeric ids) to strings.
+func requiredServerID(args map[string]interface{}) (string, error) {
+	id := firstNonEmptyString(
+		optionalStringArg(args, "server_id"),
+		optionalStringArg(args, "cluster_id"),
+		optionalStringArg(args, "server_uuid"),
+		optionalStringArg(args, "cluster_uuid"),
+		optionalStringArg(args, "uuid"),
+		optionalStringArg(args, "id"),
+	)
+	if id == "" {
+		return "", fmt.Errorf("server_id is required (use uuid from list_servers; aliases: cluster_id, server_uuid, cluster_uuid)")
+	}
+	return id, nil
+}
+
+func optionalWorkspaceIDArg(args map[string]interface{}) string {
+	return firstNonEmptyString(
+		optionalStringArg(args, "workspace_id"),
+		optionalStringArg(args, "workspace_uuid"),
+		optionalStringArg(args, "workspaceUUID"),
+	)
+}
+
+func serverNotFoundError(serverID string) error {
+	return fmt.Errorf("server %q not found — call list_servers and pass the server's uuid (preferred) or exact name; include workspace_id from the same list item when known", serverID)
 }
 
 func integerProperty(description string) map[string]interface{} {
@@ -5578,48 +5631,70 @@ func (s *Server) listServersForWorkspace(ctx context.Context, workspaceID string
 }
 
 func (s *Server) getServerTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	serverID, err := requiredString(args, "server_id")
+	serverID, err := requiredServerID(args)
 	if err != nil {
 		return nil, err
 	}
-	workspaceID, _ := args["workspace_id"].(string)
+	workspaceID := optionalWorkspaceIDArg(args)
 
 	var directErr error
+	// Fast path: UUID/numeric + known workspace → direct controller Get.
 	if isLikelyDirectProjectIdentifier(serverID) && strings.TrimSpace(workspaceID) != "" {
 		resolvedWorkspaceUUID, resolveErr := s.resolveWorkspaceUUID(ctx, workspaceID)
-		if resolveErr != nil {
-			return nil, resolveErr
+		if resolveErr == nil && resolvedWorkspaceUUID != "" {
+			resp, _, getErr := s.client.Servers.Get(ctx, serverID, resolvedWorkspaceUUID)
+			if getErr == nil {
+				return jsonResult(resp)
+			}
+			if !isServerFetchFallbackError(getErr) {
+				// Still try discovery below for wrong-workspace mistakes.
+				directErr = getErr
+			} else {
+				directErr = getErr
+			}
+		} else if resolveErr != nil {
+			// Bad workspace id — continue with unscoped discovery instead of hard-failing.
+			directErr = resolveErr
 		}
-		resp, _, err := s.client.Servers.Get(ctx, serverID, resolvedWorkspaceUUID)
-		if err == nil {
-			return jsonResult(resp)
-		}
-		if !isServerFetchFallbackError(err) {
-			return nil, err
-		}
-		directErr = err
 	}
 
 	workspace, cluster, err := s.findClusterReference(ctx, serverID, workspaceID)
 	if err != nil {
-		return nil, err
+		// Wrong/forbidden workspace should not block a global lookup.
+		if workspaceID == "" || !isWorkspaceProjectsFallbackError(err) {
+			return nil, err
+		}
+	}
+	// If a wrong workspace_id was supplied, fall back to searching all workspaces.
+	if cluster == nil && workspaceID != "" {
+		workspace, cluster, err = s.findClusterReference(ctx, serverID, "")
+		if err != nil {
+			return nil, err
+		}
 	}
 	if cluster == nil {
-		if directErr != nil {
-			return nil, directErr
+		if directErr != nil && !isServerFetchFallbackError(directErr) && !isWorkspaceProjectsFallbackError(directErr) {
+			return nil, formatToolCallError(directErr)
 		}
-		return nil, fmt.Errorf("server %q not found", serverID)
+		if directErr != nil && isServerFetchFallbackError(directErr) {
+			return nil, serverNotFoundError(serverID)
+		}
+		return nil, serverNotFoundError(serverID)
 	}
 
 	resolvedClusterID := clusterIdentity(cluster)
 	resolvedWorkspaceUUID := clusterWorkspaceUUID(cluster, workspace)
 	if resolvedClusterID != "" && resolvedWorkspaceUUID != "" {
-		resp, _, err := s.client.Servers.Get(ctx, resolvedClusterID, resolvedWorkspaceUUID)
-		if err == nil {
+		resp, _, getErr := s.client.Servers.Get(ctx, resolvedClusterID, resolvedWorkspaceUUID)
+		if getErr == nil {
 			return jsonResult(resp)
 		}
-		if !isServerFetchFallbackError(err) {
-			return nil, err
+		if !isServerFetchFallbackError(getErr) {
+			// Prefer list metadata over opaque API failures when we already resolved the server.
+			// Only hard-fail non-retryable auth-style errors.
+			if !isWorkspaceProjectsFallbackError(getErr) {
+				return nil, formatToolCallError(getErr)
+			}
 		}
 	}
 
@@ -5633,61 +5708,65 @@ func (s *Server) getServerTool(ctx context.Context, args map[string]interface{})
 }
 
 func (s *Server) getClusterConnectionTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	clusterID, _ := args["server_id"].(string)
-	if clusterID == "" {
-		clusterID, _ = args["cluster_id"].(string)
-	}
-	if clusterID == "" {
-		return nil, fmt.Errorf("server_id is required")
-	}
-
-	var directErr error
-	if isLikelyDirectProjectIdentifier(clusterID) {
-		resp, _, err := s.client.Servers.GetClusterConnection(ctx, clusterID)
-		if err == nil {
-			return jsonResult(resp)
-		}
-		if !isWorkspaceProjectsFallbackError(err) {
-			return nil, err
-		}
-		directErr = err
-	}
-
-	_, cluster, err := s.findClusterReference(ctx, clusterID, "")
+	clusterID, err := requiredServerID(args)
 	if err != nil {
 		return nil, err
 	}
-	if cluster == nil {
-		if directErr != nil {
-			return nil, directErr
+	workspaceID := optionalWorkspaceIDArg(args)
+
+	var directErr error
+	if isLikelyDirectProjectIdentifier(clusterID) {
+		resp, _, getErr := s.client.Servers.GetClusterConnection(ctx, clusterID)
+		if getErr == nil {
+			return jsonResult(resp)
 		}
-		return nil, fmt.Errorf("server %q not found", clusterID)
+		if !isWorkspaceProjectsFallbackError(getErr) {
+			directErr = getErr
+		} else {
+			directErr = getErr
+		}
+	}
+
+	_, cluster, findErr := s.findClusterReference(ctx, clusterID, workspaceID)
+	if findErr != nil {
+		if workspaceID == "" || !isWorkspaceProjectsFallbackError(findErr) {
+			return nil, findErr
+		}
+	}
+	if cluster == nil && workspaceID != "" {
+		_, cluster, findErr = s.findClusterReference(ctx, clusterID, "")
+		if findErr != nil {
+			return nil, findErr
+		}
+	}
+	if cluster == nil {
+		if directErr != nil && !isWorkspaceProjectsFallbackError(directErr) {
+			return nil, formatToolCallError(directErr)
+		}
+		return nil, serverNotFoundError(clusterID)
 	}
 
 	resolvedClusterID := clusterIdentity(cluster)
 	if resolvedClusterID == "" {
-		if directErr != nil {
-			return nil, directErr
+		if directErr != nil && !isWorkspaceProjectsFallbackError(directErr) {
+			return nil, formatToolCallError(directErr)
 		}
-		return nil, fmt.Errorf("server %q not found", clusterID)
+		return nil, serverNotFoundError(clusterID)
 	}
 
-	resp, _, err := s.client.Servers.GetClusterConnection(ctx, resolvedClusterID)
-	if err != nil {
-		return nil, err
+	resp, _, getErr := s.client.Servers.GetClusterConnection(ctx, resolvedClusterID)
+	if getErr != nil {
+		return nil, formatToolCallError(getErr)
 	}
 	return jsonResult(resp)
 }
 
 func (s *Server) getClusterCostAllocationTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
-	clusterID, _ := args["server_id"].(string)
-	if clusterID == "" {
-		clusterID, _ = args["cluster_id"].(string)
+	clusterID, err := requiredServerID(args)
+	if err != nil {
+		return nil, err
 	}
-	if clusterID == "" {
-		return nil, fmt.Errorf("server_id is required")
-	}
-	workspaceID, _ := args["workspace_id"].(string)
+	workspaceID := optionalWorkspaceIDArg(args)
 	aggregate, _ := args["aggregate"].(string)
 	window, _ := args["window"].(string)
 	location, _ := args["location"].(string)

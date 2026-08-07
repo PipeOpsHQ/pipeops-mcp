@@ -557,6 +557,24 @@ func TestHandleToolsListSchemas(t *testing.T) {
 		t.Fatalf("Expected revoke_service_account_token to require only token_id, got %v", revokeServiceAccountTokenRequired)
 	}
 
+	getServer := toolByName["get_server"]
+	getServerRequired, ok := getServer.InputSchema["required"].([]string)
+	if !ok {
+		t.Fatal("Expected get_server required schema to be []string")
+	}
+	if len(getServerRequired) != 1 || getServerRequired[0] != "server_id" {
+		t.Fatalf("Expected get_server to require only server_id, got %v", getServerRequired)
+	}
+	getServerProperties, ok := getServer.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected get_server properties schema")
+	}
+	for _, field := range []string{"server_id", "cluster_id", "workspace_id", "context"} {
+		if _, ok := getServerProperties[field]; !ok {
+			t.Errorf("Expected get_server to expose %s", field)
+		}
+	}
+
 	getServerConnection := toolByName["get_server_connection"]
 	getServerConnectionRequired, ok := getServerConnection.InputSchema["required"].([]string)
 	if !ok {
@@ -575,8 +593,11 @@ func TestHandleToolsListSchemas(t *testing.T) {
 	if _, ok := getServerConnectionProperties["server_id"]; !ok {
 		t.Error("Expected get_server_connection to expose server_id")
 	}
-	if _, ok := getServerConnectionProperties["cluster_id"]; ok {
-		t.Error("Did not expect get_server_connection to expose cluster_id")
+	if _, ok := getServerConnectionProperties["cluster_id"]; !ok {
+		t.Error("Expected get_server_connection to expose cluster_id alias")
+	}
+	if _, ok := getServerConnectionProperties["context"]; !ok {
+		t.Error("Expected get_server_connection to expose optional context for intent analytics")
 	}
 
 	getServerCostAllocation := toolByName["get_server_cost_allocation"]
@@ -597,8 +618,8 @@ func TestHandleToolsListSchemas(t *testing.T) {
 	if _, ok := getServerCostAllocationProperties["server_id"]; !ok {
 		t.Error("Expected get_server_cost_allocation to expose server_id")
 	}
-	if _, ok := getServerCostAllocationProperties["cluster_id"]; ok {
-		t.Error("Did not expect get_server_cost_allocation to expose cluster_id")
+	if _, ok := getServerCostAllocationProperties["cluster_id"]; !ok {
+		t.Error("Expected get_server_cost_allocation to expose cluster_id alias")
 	}
 	if _, ok := getServerCostAllocationProperties["workspace_id"]; !ok {
 		t.Error("Expected get_server_cost_allocation to expose workspace_id override")
@@ -942,7 +963,7 @@ func TestHandleToolsCallValidatesRequiredArguments(t *testing.T) {
 		t.Fatal("Expected missing server_id error for get_server_connection")
 	}
 
-	if err.Error() != "server_id is required" {
+	if !strings.Contains(err.Error(), "server_id is required") {
 		t.Fatalf("Expected server_id error, got %v", err)
 	}
 
@@ -951,7 +972,7 @@ func TestHandleToolsCallValidatesRequiredArguments(t *testing.T) {
 		t.Fatal("Expected missing server_id error for get_server_cost_allocation")
 	}
 
-	if err.Error() != "server_id is required" {
+	if !strings.Contains(err.Error(), "server_id is required") {
 		t.Fatalf("Expected server_id error, got %v", err)
 	}
 
@@ -1025,7 +1046,7 @@ func TestHandleToolsCallSupportsLegacyClusterToolAliases(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected missing server_id error for legacy get_cluster_connection alias")
 	}
-	if err.Error() != "server_id is required" {
+	if !strings.Contains(err.Error(), "server_id is required") {
 		t.Fatalf("Expected server_id error, got %v", err)
 	}
 
@@ -1033,7 +1054,7 @@ func TestHandleToolsCallSupportsLegacyClusterToolAliases(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected missing server_id error for legacy get_cluster_cost_allocation alias")
 	}
-	if err.Error() != "server_id is required" {
+	if !strings.Contains(err.Error(), "server_id is required") {
 		t.Fatalf("Expected server_id error, got %v", err)
 	}
 }
@@ -1274,6 +1295,117 @@ func TestGetServerToolFallsBackToWorkspaceLookupForServerSlug(t *testing.T) {
 	}
 	if requests["/cluster/faulty-art"] != 0 {
 		t.Fatalf("cluster/faulty-art calls = %d, want 0", requests["/cluster/faulty-art"])
+	}
+}
+
+func TestGetServerToolFallsBackWhenWorkspaceIDWrong(t *testing.T) {
+	t.Parallel()
+
+	wrongWorkspace := "11111111-1111-1111-1111-111111111111"
+	rightWorkspace := "6f36dd81-50e9-4ea3-8094-8e0212684a11"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"`+wrongWorkspace+`"},{"ID":2,"UUID":"`+rightWorkspace+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+wrongWorkspace:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"`+wrongWorkspace+`","Clusters":[{"Cluster":{"uuid":"other","name":"other"}}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+rightWorkspace:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"`+rightWorkspace+`","Clusters":[{"Cluster":{"uuid":"srv2","name":"Faulty Art","status":"running"}}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/cluster/srv2":
+				// Direct Get with wrong workspace first, then correct after discovery.
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"uuid":"srv2","name":"Faulty Art","status":"running"}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	// Wrong workspace_id should not hard-fail; search all workspaces.
+	result, err := server.getServerTool(context.Background(), map[string]interface{}{
+		"server_id":    "srv2",
+		"workspace_id": wrongWorkspace,
+	})
+	if err != nil {
+		t.Fatalf("getServerTool error: %v", err)
+	}
+	text := result.(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})["text"].(string)
+	if !strings.Contains(text, "srv2") {
+		t.Fatalf("expected srv2 in result, got %s", text)
+	}
+}
+
+func TestGetServerToolAcceptsAliasesAndNumericIDs(t *testing.T) {
+	t.Parallel()
+
+	workspaceUUID := "6f36dd81-50e9-4ea3-8094-8e0212684a11"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":2,"UUID":"`+workspaceUUID+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceUUID:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"`+workspaceUUID+`","Clusters":[{"Cluster":{"id":42,"uuid":"srv2","name":"Node"}}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/cluster/srv2":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"uuid":"srv2","name":"Node"}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+
+	// cluster_id alias
+	if _, err := server.getServerTool(context.Background(), map[string]interface{}{"cluster_id": "srv2"}); err != nil {
+		t.Fatalf("cluster_id alias: %v", err)
+	}
+	// numeric id (JSON number)
+	if _, err := server.getServerTool(context.Background(), map[string]interface{}{"server_id": float64(42)}); err != nil {
+		t.Fatalf("numeric server_id: %v", err)
+	}
+}
+
+func TestGetServerToolNotFoundGuidesToListServers(t *testing.T) {
+	t.Parallel()
+
+	workspaceUUID := "6f36dd81-50e9-4ea3-8094-8e0212684a11"
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":2,"UUID":"`+workspaceUUID+`"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/"+workspaceUUID:
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"`+workspaceUUID+`","Clusters":[]}}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	_, err = server.getServerTool(context.Background(), map[string]interface{}{"server_id": "does-not-exist"})
+	if err == nil {
+		t.Fatal("expected not found error")
+	}
+	if !strings.Contains(err.Error(), "list_servers") {
+		t.Fatalf("expected list_servers guidance, got %v", err)
 	}
 }
 

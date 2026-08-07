@@ -205,7 +205,7 @@ func (c *Client) CaptureToolCall(ev ToolCallEvent) {
 		props.Set("$mcp_intent_source", intentSource)
 	}
 	if ev.IsError {
-		props.Set("$mcp_error_type", "internal")
+		props.Set("$mcp_error_type", classifyToolError(ev.ErrorMessage))
 		if ev.ErrorMessage != "" {
 			props.Set("$mcp_error_message", truncateString(ev.ErrorMessage))
 		}
@@ -293,6 +293,31 @@ func (c *Client) enqueue(distinctID, event string, props posthog.Properties, ano
 		Properties: props,
 		Timestamp:  time.Now().UTC(),
 	})
+}
+
+// classifyToolError maps tool error text to a coarse $mcp_error_type for dashboards.
+func classifyToolError(msg string) string {
+	lower := strings.ToLower(strings.TrimSpace(msg))
+	switch {
+	case lower == "":
+		return "internal"
+	case strings.Contains(lower, " 419 "), strings.HasSuffix(lower, ": 419"), strings.Contains(lower, "session expired"), strings.Contains(lower, "session has ended"):
+		return "auth_session"
+	case strings.Contains(lower, " 401 "), strings.Contains(lower, "not authenticated"), strings.Contains(lower, "invalid or missing authentication"), strings.Contains(lower, "cookie token is empty"):
+		return "auth"
+	case strings.Contains(lower, " 403 "), strings.Contains(lower, "not enough permission"), strings.Contains(lower, "forbidden"), strings.Contains(lower, "not allowed by the approved oauth"):
+		return "permission"
+	case strings.Contains(lower, "not found"), strings.Contains(lower, "does not exist"):
+		return "not_found"
+	case strings.Contains(lower, "is required"), strings.Contains(lower, "invalid arguments"), strings.Contains(lower, "unsupported "), strings.Contains(lower, "must be"):
+		return "validation"
+	case strings.Contains(lower, " 429 "), strings.Contains(lower, "rate limit"), strings.Contains(lower, "too many requests"):
+		return "rate_limit"
+	case strings.Contains(lower, " 5"), strings.Contains(lower, "timeout"), strings.Contains(lower, "temporarily unavailable"), strings.Contains(lower, "connection reset"):
+		return "upstream"
+	default:
+		return "internal"
+	}
 }
 
 // extractIntent pulls optional `context` / `intent` from tool args (PostHog
