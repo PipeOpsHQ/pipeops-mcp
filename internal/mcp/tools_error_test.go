@@ -30,3 +30,10 @@ func TestFormatToolCallError_Passthrough(t *testing.T) {
 		t.Fatalf("unexpected rewrite: %v", err)
 	}
 }
+
+func TestFormatToolCallError_ServerNotFound(t *testing.T) {
+	err := formatToolCallError(errors.New(`server "abc" not found`))
+	if err == nil || !strings.Contains(err.Error(), "list_servers") {
+		t.Fatalf("want list_servers guidance, got %v", err)
+	}
+}

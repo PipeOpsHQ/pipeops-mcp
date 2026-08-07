@@ -26,6 +26,24 @@ func TestExtractIntent(t *testing.T) {
 	}
 }
 
+func TestClassifyToolError(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		`server "x" not found — call list_servers`:                 "not_found",
+		"GET https://api/x: 401 invalid or missing authentication": "auth",
+		"session has ended":                  "auth_session",
+		"server_id is required":              "validation",
+		"GET https://api/x: 403 forbidden":   "permission",
+		"GET https://api/x: 502 bad gateway": "upstream",
+		"something weird":                    "internal",
+	}
+	for msg, want := range cases {
+		if got := classifyToolError(msg); got != want {
+			t.Errorf("classifyToolError(%q) = %q, want %q", msg, got, want)
+		}
+	}
+}
+
 func TestSanitizeValueRedactsSecrets(t *testing.T) {
 	t.Parallel()
 	got := sanitizeValue(map[string]interface{}{

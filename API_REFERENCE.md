@@ -288,14 +288,16 @@ Show me all my servers
 
 ### get_server
 
-Get detailed information about a specific server.
+Get detailed information about a specific server/cluster.
 
 **Arguments:**
-- `server_id` (string, required): The server ID or UUID
+- `server_id` (string, required): Prefer the **`uuid` from `list_servers`**. Also accepts exact name/slug, numeric id, or `cluster_id` alias.
+- `workspace_id` (string, optional): Workspace UUID from the same `list_servers` item (speeds lookup; wrong values fall back to all workspaces).
+- `context` (string, optional): Natural-language goal for this call (analytics intent only; not sent to the API).
 
 **Example:**
 ```
-Get details for server srv_xyz789
+Get details for server <uuid-from-list_servers>
 ```
 
 **Response:**
