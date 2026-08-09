@@ -2502,17 +2502,23 @@ func (s *Server) requestProjectDeploymentCollectionWithFallback(ctx context.Cont
 
 	// Match get_project: allow unresolved workspace so name/slug lookup still
 	// returns the project (e.g. "faulty-art") and we can retry with its UUID.
-	// findProjectReference(allowUnresolved=false) skipped name hits when
-	// workspace metadata was empty → false "project not found" for slugs.
+	// Also recovers when Cortex auto-injects a workspace_id that does not own
+	// the named project (scoped search miss → global name/slug resolve).
 	workspace, project, err := s.findProjectReferenceWithFallback(ctx, projectID, workspaceID, true)
 	if err != nil {
 		return nil, nil, err
+	}
+	if project == nil && strings.TrimSpace(workspaceID) != "" {
+		workspace, project, err = s.findProjectReferenceWithFallback(ctx, projectID, "", true)
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	if project == nil {
 		if directErr != nil {
 			return nil, nil, directErr
 		}
-		return nil, nil, fmt.Errorf("project %q not found", projectID)
+		return nil, nil, fmt.Errorf("project %q not found — pass project UUID from list_projects, or ensure the name/slug is visible to this token", projectID)
 	}
 
 	projectIdentifiers := projectLogIdentifiers(project)
@@ -3777,32 +3783,65 @@ func (s *Server) findProjectReferenceWithFallback(ctx context.Context, projectID
 		workspaces []workspaceReference
 		err        error
 	)
-	if workspaceID != "" {
-		workspace, resolveErr := s.resolveWorkspaceReference(ctx, workspaceID)
+	scopedWorkspaceID := strings.TrimSpace(workspaceID)
+	if scopedWorkspaceID != "" {
+		workspace, resolveErr := s.resolveWorkspaceReference(ctx, scopedWorkspaceID)
 		if resolveErr != nil {
-			return workspaceReference{}, nil, resolveErr
+			// Bad/stale workspace inject (common from Cortex session context) should
+			// not hard-fail name/slug resolution — fall through to global search.
+			if !allowUnresolved {
+				return workspaceReference{}, nil, resolveErr
+			}
+		} else {
+			workspaces = []workspaceReference{workspace}
 		}
-		workspaces = []workspaceReference{workspace}
-	} else {
+	}
+	if len(workspaces) == 0 {
 		workspaces, _, _, err = s.listWorkspaceReferences(ctx)
 		if err != nil {
 			return workspaceReference{}, nil, err
 		}
 	}
 
-	for _, workspace := range workspaces {
-		projects, _, _, fetchErr := s.fetchProjectsForWorkspaceReference(ctx, workspace)
-		if fetchErr != nil {
-			if isWorkspaceProjectsFallbackError(fetchErr) {
-				continue
+	searchWorkspaces := func(list []workspaceReference) (workspaceReference, map[string]interface{}, bool, error) {
+		for _, workspace := range list {
+			projects, _, _, fetchErr := s.fetchProjectsForWorkspaceReference(ctx, workspace)
+			if fetchErr != nil {
+				if isWorkspaceProjectsFallbackError(fetchErr) {
+					continue
+				}
+				return workspaceReference{}, nil, false, fetchErr
 			}
-			return workspaceReference{}, nil, fetchErr
-		}
-		for _, project := range projects {
-			if projectMatchesIdentifier(project, projectID) {
-				return workspace, normalizeProject(project), nil
+			for _, project := range projects {
+				if projectMatchesIdentifier(project, projectID) {
+					return workspace, normalizeProject(project), true, nil
+				}
 			}
 		}
+		return workspaceReference{}, nil, false, nil
+	}
+
+	if ws, project, ok, searchErr := searchWorkspaces(workspaces); searchErr != nil {
+		return workspaceReference{}, nil, searchErr
+	} else if ok {
+		return ws, project, nil
+	}
+
+	// Scoped workspace (e.g. auto-injected by Cortex) missed the project —
+	// search every workspace so name/slug still resolves.
+	if scopedWorkspaceID != "" {
+		allWorkspaces, _, _, listErr := s.listWorkspaceReferences(ctx)
+		if listErr != nil {
+			if !allowUnresolved {
+				return workspaceReference{}, nil, listErr
+			}
+		} else if ws, project, ok, searchErr := searchWorkspaces(allWorkspaces); searchErr != nil {
+			return workspaceReference{}, nil, searchErr
+		} else if ok {
+			return ws, project, nil
+		}
+		// Prefer resolving workspace against the full list below.
+		workspaces = allWorkspaces
 	}
 
 	projectRefs, _, _, err := s.fetchProjectNameReferences(ctx)
@@ -3824,7 +3863,10 @@ func (s *Server) findProjectReferenceWithFallback(ctx context.Context, projectID
 			return workspaceReference{}, nil, resolveErr
 		}
 		if workspace.UUID == "" && workspace.ID == "" {
-			if allowUnresolved && strings.TrimSpace(workspaceID) == "" {
+			// allowUnresolved: return the project even when the caller scoped a
+			// workspace that doesn't match (Cortex injects workspace_id on tools).
+			// Downstream uses project UUID and can omit workspace_uuid.
+			if allowUnresolved {
 				return workspaceReference{}, normalizedProject, nil
 			}
 			continue

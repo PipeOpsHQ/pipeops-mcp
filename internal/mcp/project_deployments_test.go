@@ -222,6 +222,52 @@ func TestListProjectDeploymentHistoryToolResolvesNameWithoutWorkspaceUUID(t *tes
 	}
 }
 
+func TestListProjectDeploymentsToolResolvesSlugDespiteWrongInjectedWorkspace(t *testing.T) {
+	t.Parallel()
+
+	// Cortex often injects workspace_id from the session. If that workspace does
+	// not contain the named project, we must still resolve via other workspaces.
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"ws-wrong"},{"ID":2,"UUID":"ws-right"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/ws-wrong":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"workspace":{"UUID":"ws-wrong","Projects":[{"UUID":"p-other","Name":"other","NameSlug":"other"}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/ws-right":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"workspace":{"UUID":"ws-right","Projects":[{"UUID":"p-faulty","Name":"faulty-art","NameSlug":"faulty-art"}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/get-deployments/p-faulty":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":[{"SHA":"abc","Status":"deployed"}],"meta":{"current_count":1}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listProjectDeploymentsTool(context.Background(), map[string]interface{}{
+		"project_id":   "faulty-art",
+		"workspace_id": "ws-wrong",
+	})
+	if err != nil {
+		t.Fatalf("listProjectDeploymentsTool with wrong workspace inject: %v", err)
+	}
+	payload := decodeToolJSONResult(t, result)
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	deployments, ok := data["deployments"].([]interface{})
+	if !ok || len(deployments) != 1 {
+		t.Fatalf("Expected single deployment, got %v", data["deployments"])
+	}
+}
+
 func TestSearchProjectDeploymentsToolFiltersResponse(t *testing.T) {
 	t.Parallel()
 
