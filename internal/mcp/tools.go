@@ -2500,7 +2500,11 @@ func (s *Server) requestProjectDeploymentCollectionWithFallback(ctx context.Cont
 		directErr = err
 	}
 
-	workspace, project, err := s.findProjectReference(ctx, projectID, workspaceID)
+	// Match get_project: allow unresolved workspace so name/slug lookup still
+	// returns the project (e.g. "faulty-art") and we can retry with its UUID.
+	// findProjectReference(allowUnresolved=false) skipped name hits when
+	// workspace metadata was empty → false "project not found" for slugs.
+	workspace, project, err := s.findProjectReferenceWithFallback(ctx, projectID, workspaceID, true)
 	if err != nil {
 		return nil, nil, err
 	}

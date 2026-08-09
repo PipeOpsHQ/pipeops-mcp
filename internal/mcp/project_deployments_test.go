@@ -139,6 +139,89 @@ func TestListProjectDeploymentHistoryToolUsesHistoryRoute(t *testing.T) {
 	}
 }
 
+func TestListProjectDeploymentHistoryToolResolvesProjectSlug(t *testing.T) {
+	t.Parallel()
+
+	// Slug/name must resolve via workspace project inventory, then history by UUID.
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"ID":1,"UUID":"w1"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace/fetch/w1":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"workspace":{"UUID":"w1","Projects":[{"UUID":"p-faulty","Name":"faulty-art","NameSlug":"faulty-art"}]}}}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/deployment/p-faulty":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":[{"UUID":"d1","Status":"failed"}],"meta":{"current_count":1}}`), nil
+			default:
+				t.Fatalf("unexpected request: %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+				return nil, nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listProjectDeploymentHistoryTool(context.Background(), map[string]interface{}{
+		"project_id": "faulty-art",
+	})
+	if err != nil {
+		t.Fatalf("listProjectDeploymentHistoryTool by slug error: %v", err)
+	}
+	payload := decodeToolJSONResult(t, result)
+	data, ok := payload["data"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected data map, got %v", payload["data"])
+	}
+	deployments, ok := data["deployments"].([]interface{})
+	if !ok || len(deployments) != 1 {
+		t.Fatalf("Expected single deployment after slug resolve, got %v", data["deployments"])
+	}
+}
+
+func TestListProjectDeploymentHistoryToolResolvesNameWithoutWorkspaceUUID(t *testing.T) {
+	t.Parallel()
+
+	// Project names API returns a match but workspace UUID is missing on the row.
+	// allowUnresolved=true lets us still use project UUID for the history route.
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/workspace":
+				// No workspaces — force name-index fallback.
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/fetch-names":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":[{"UUID":"p-faulty","Name":"faulty-art","NameSlug":"faulty-art"}]}`), nil
+			case r.Method == http.MethodGet && r.URL.Path == "/project/deployment/p-faulty":
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":[{"UUID":"d1","Status":"failed"}],"meta":{"current_count":1}}`), nil
+			default:
+				// Other discovery endpoints may be probed; return empty rather than fail.
+				return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{}}`), nil
+			}
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.listProjectDeploymentHistoryTool(context.Background(), map[string]interface{}{
+		"project_id": "faulty-art",
+	})
+	if err != nil {
+		t.Fatalf("listProjectDeploymentHistoryTool unresolved-workspace slug error: %v", err)
+	}
+	payload := decodeToolJSONResult(t, result)
+	data, _ := payload["data"].(map[string]interface{})
+	deployments, ok := data["deployments"].([]interface{})
+	if !ok || len(deployments) != 1 {
+		t.Fatalf("Expected single deployment, got %v", data)
+	}
+}
+
 func TestSearchProjectDeploymentsToolFiltersResponse(t *testing.T) {
 	t.Parallel()
 
