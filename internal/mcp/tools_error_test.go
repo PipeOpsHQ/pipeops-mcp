@@ -37,3 +37,21 @@ func TestFormatToolCallError_ServerNotFound(t *testing.T) {
 		t.Fatalf("want list_servers guidance, got %v", err)
 	}
 }
+
+func TestFormatToolCallError_HTML403TruncatesBody(t *testing.T) {
+	raw := `GET https://api.pipeops.io/addons/deployments/dep-1/backups?workspace=ws-1: 403 <!DOCTYPE html><html><head><title>404 | Page Not Found</title></head><body><style>*{margin:0}</style><h1>Page Not Found</h1></body></html>`
+	err := formatToolCallError(errors.New(raw))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	msg := err.Error()
+	if strings.Contains(strings.ToLower(msg), "<!doctype") || strings.Contains(msg, "<style") {
+		t.Fatalf("HTML body must not leak into tool error: %s", msg)
+	}
+	if !strings.Contains(msg, "403") || !strings.Contains(msg, "/backups") {
+		t.Fatalf("want short URL/status preserved, got %s", msg)
+	}
+	if !strings.Contains(msg, "list_addon_deployments") && !strings.Contains(msg, "deployment UUID") {
+		t.Fatalf("want actionable addon-backups guidance, got %s", msg)
+	}
+}

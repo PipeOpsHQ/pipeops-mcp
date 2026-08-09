@@ -1974,13 +1974,19 @@ func formatToolCallError(err error) error {
 	msg := err.Error()
 	// Controller returns HTTP 419 for ended/revoked user sessions (JWT may still look unexpired).
 	if strings.Contains(msg, " 419 ") || strings.HasSuffix(msg, ": 419") || strings.Contains(msg, "session has ended") {
-		return fmt.Errorf("%w — PipeOps session expired or was revoked (HTTP 419). Re-authenticate: set a fresh PIPEOPS_TOKEN (service token) or re-run OAuth login (pipeops login / MCP authorize)", err)
+		return fmt.Errorf("%s — PipeOps session expired or was revoked (HTTP 419). Re-authenticate: set a fresh PIPEOPS_TOKEN (service token) or re-run OAuth login (pipeops login / MCP authorize)", shortAPIError(msg))
 	}
 	if strings.Contains(msg, " 401 ") || strings.Contains(msg, "invalid or missing authentication") || strings.Contains(msg, "cookie token is empty") {
-		return fmt.Errorf("%w — Not authenticated. Export PIPEOPS_TOKEN=sat_… or complete MCP OAuth before calling tools", err)
+		return fmt.Errorf("%s — Not authenticated. Export PIPEOPS_TOKEN=sat_… or complete MCP OAuth before calling tools", shortAPIError(msg))
 	}
-	if isHTMLErrorBody(msg) && (strings.Contains(msg, " 403 ") || strings.Contains(msg, ": 403")) {
-		return fmt.Errorf("%w — API returned HTML (not JSON), usually Cloudflare/WAF blocking or a dead edge path. Retry with a browser-authenticated OAuth session (not sat_ alone for /billing/*), confirm workspace_uuid via list_workspaces, and avoid invented UUIDs", err)
+	// Never dump Cloudflare/console HTML bodies into chat (often multi-KB of CSS).
+	if isHTMLErrorBody(msg) {
+		short := shortAPIError(msg)
+		hint := "API returned HTML instead of JSON (edge/WAF or wrong query). Prefer deployment UUID from list_addon_deployments; do not invent workspace query params for /addons/*/backups (server derives workspace from the deployment)."
+		if strings.Contains(msg, "/backups") {
+			hint = "Addon backups API returned HTML (not JSON). Use a real deployment UUID from list_addon_deployments; omit workspace unless you know the deployment's workspace. Auto-picked workspace query params often 403 on this path."
+		}
+		return fmt.Errorf("%s — %s", short, hint)
 	}
 	if strings.Contains(strings.ToLower(msg), "workspace with uuid not found") {
 		return fmt.Errorf("%w — That workspace is not owned by the current user (team workspaces need team_uuid) or does not exist. Call list_workspaces and use a UUID from that list", err)
@@ -2003,6 +2009,27 @@ func isHTMLErrorBody(msg string) bool {
 		strings.Contains(lower, "<html") ||
 		strings.Contains(lower, "page not found") ||
 		strings.Contains(lower, "cloudflare")
+}
+
+// shortAPIError keeps method/URL/status and drops HTML bodies so tool errors
+// stay readable in Cortex chat.
+func shortAPIError(msg string) string {
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return "API request failed"
+	}
+	// Typical SDK form: GET https://…: 403 <!DOCTYPE html>...
+	if idx := strings.Index(strings.ToLower(msg), "<!doctype"); idx > 0 {
+		return strings.TrimSpace(msg[:idx])
+	}
+	if idx := strings.Index(strings.ToLower(msg), "<html"); idx > 0 {
+		return strings.TrimSpace(msg[:idx])
+	}
+	const max = 280
+	if len(msg) > max {
+		return msg[:max] + "…"
+	}
+	return msg
 }
 
 // formatBillingError adds billing-route-specific guidance (JWT+session only).
@@ -7206,7 +7233,7 @@ func (s *Server) listAddonBackupsTool(ctx context.Context, args map[string]inter
 
 	resp, _, err := s.client.AddOns.ListAddonBackups(ctx, req.DeploymentID)
 	if err != nil {
-		return nil, err
+		return nil, formatToolCallError(err)
 	}
 	return jsonResult(resp)
 }
@@ -7229,7 +7256,7 @@ func (s *Server) startAddonBackupExportTool(ctx context.Context, args map[string
 		Format:     strings.TrimSpace(req.Format),
 	})
 	if err != nil {
-		return nil, err
+		return nil, formatToolCallError(err)
 	}
 	return jsonResult(resp)
 }
@@ -7248,7 +7275,7 @@ func (s *Server) getAddonBackupExportTool(ctx context.Context, args map[string]i
 
 	resp, _, err := s.client.AddOns.GetAddonBackupExport(ctx, req.DeploymentID, req.ExportID)
 	if err != nil {
-		return nil, err
+		return nil, formatToolCallError(err)
 	}
 	return jsonResult(resp)
 }
