@@ -78,6 +78,13 @@ func TestGitOpsAndProjectGroupToolSchemas(t *testing.T) {
 	if !containsRequiredField(getRequired, "application_uuid") {
 		t.Fatal("Expected get_gitops_application to require application_uuid")
 	}
+	getProps, ok := getGitOps.InputSchema["properties"].(map[string]interface{})
+	if !ok {
+		t.Fatal("Expected get_gitops_application properties schema")
+	}
+	if _, ok := getProps["workspace_id"]; !ok {
+		t.Fatal("Expected get_gitops_application to expose workspace_id")
+	}
 
 	syncGitOps := toolByName["sync_gitops_application"]
 	syncRequired, ok := syncGitOps.InputSchema["required"].([]string)
@@ -91,7 +98,7 @@ func TestGitOpsAndProjectGroupToolSchemas(t *testing.T) {
 	if !ok {
 		t.Fatal("Expected sync_gitops_application properties schema")
 	}
-	for _, key := range []string{"revision", "prune", "dry_run"} {
+	for _, key := range []string{"revision", "prune", "dry_run", "workspace_id"} {
 		if _, ok := syncProps[key]; !ok {
 			t.Fatalf("Expected sync_gitops_application to expose %s", key)
 		}
@@ -265,6 +272,7 @@ func TestSyncGitOpsApplicationTool(t *testing.T) {
 	t.Parallel()
 
 	const applicationUUID = "gitops-abc"
+	const workspaceUUID = "ws-gitops"
 
 	client, err := pipeops.NewClient("https://api.pipeops.test")
 	if err != nil {
@@ -272,11 +280,17 @@ func TestSyncGitOpsApplicationTool(t *testing.T) {
 	}
 	client.SetHTTPClient(&http.Client{
 		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet && (r.URL.Path == "/workspace" || r.URL.Path == "/workspaces") {
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":[{"UUID":"`+workspaceUUID+`","Name":"ws"}],"message":"ok","success":true}`), nil
+			}
 			if r.Method != http.MethodPost {
 				t.Fatalf("method = %s, want POST", r.Method)
 			}
 			if r.URL.Path != "/api/v1/gitops/applications/"+applicationUUID+"/sync" {
 				t.Fatalf("path = %s, want sync path", r.URL.Path)
+			}
+			if got := r.URL.Query().Get("workspace_uuid"); got != workspaceUUID {
+				t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
 			}
 			return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"status":"synced","revision":"abc123","dry_run":false}}`), nil
 		}),
@@ -285,11 +299,94 @@ func TestSyncGitOpsApplicationTool(t *testing.T) {
 	server := &Server{client: client}
 	result, err := server.syncGitOpsApplicationTool(context.Background(), map[string]interface{}{
 		"application_uuid": applicationUUID,
+		"workspace_id":     workspaceUUID,
 		"revision":         "abc123",
 		"prune":            true,
 	})
 	if err != nil {
 		t.Fatalf("syncGitOpsApplicationTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+}
+
+func TestGetGitOpsApplicationToolForwardsWorkspace(t *testing.T) {
+	t.Parallel()
+
+	const applicationUUID = "gitops-abc"
+	const workspaceUUID = "ws-gitops"
+
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet && (r.URL.Path == "/workspace" || r.URL.Path == "/workspaces") {
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":[{"UUID":"`+workspaceUUID+`","Name":"ws"}],"message":"ok","success":true}`), nil
+			}
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			if r.URL.Path != "/api/v1/gitops/applications/"+applicationUUID {
+				t.Fatalf("path = %s, want get path", r.URL.Path)
+			}
+			if got := r.URL.Query().Get("workspace_uuid"); got != workspaceUUID {
+				t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
+			}
+			return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"uuid":"`+applicationUUID+`","name":"demo"}}`), nil
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getGitOpsApplicationTool(context.Background(), map[string]interface{}{
+		"application_uuid": applicationUUID,
+		"workspace_id":     workspaceUUID,
+	})
+	if err != nil {
+		t.Fatalf("getGitOpsApplicationTool error: %v", err)
+	}
+	if result == nil {
+		t.Fatal("Expected result")
+	}
+}
+
+func TestGetServiceAccountTokenToolForwardsWorkspace(t *testing.T) {
+	t.Parallel()
+
+	const tokenID = "token-abc"
+	const workspaceUUID = "ws-tokens"
+
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient error: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method == http.MethodGet && (r.URL.Path == "/workspace" || r.URL.Path == "/workspaces") {
+				return jsonHTTPResponse(r, http.StatusOK, `{"data":[{"UUID":"`+workspaceUUID+`","Name":"ws"}],"message":"ok","success":true}`), nil
+			}
+			if r.Method != http.MethodGet {
+				t.Fatalf("method = %s, want GET", r.Method)
+			}
+			if r.URL.Path != "/api/v1/service-account-tokens/"+tokenID {
+				t.Fatalf("path = %s, want token path", r.URL.Path)
+			}
+			if got := r.URL.Query().Get("workspace_uuid"); got != workspaceUUID {
+				t.Fatalf("workspace_uuid = %q, want %q", got, workspaceUUID)
+			}
+			return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"data":{"token":{"uuid":"`+tokenID+`","name":"readonly"}}}`), nil
+		}),
+	})
+
+	server := &Server{client: client}
+	result, err := server.getServiceAccountTokenTool(context.Background(), map[string]interface{}{
+		"token_id":     tokenID,
+		"workspace_id": workspaceUUID,
+	})
+	if err != nil {
+		t.Fatalf("getServiceAccountTokenTool error: %v", err)
 	}
 	if result == nil {
 		t.Fatal("Expected result")

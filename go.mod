@@ -3,7 +3,7 @@ module github.com/PipeOpsHQ/pipeops-mcp
 go 1.25.0
 
 require (
-	github.com/PipeOpsHQ/pipeops-go-sdk v0.18.2
+	github.com/PipeOpsHQ/pipeops-go-sdk v0.18.4
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/posthog/posthog-go v1.17.5
 	github.com/redis/go-redis/v9 v9.17.2

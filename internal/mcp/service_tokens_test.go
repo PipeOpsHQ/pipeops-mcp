@@ -79,7 +79,7 @@ func TestListServiceAccountTokensUsesWorkspaceUUID(t *testing.T) {
 						if got := r.URL.Query().Get("workspace_uuid"); got != tt.wantWorkspaceUUID {
 							t.Fatalf("workspace_uuid = %q, want %q", got, tt.wantWorkspaceUUID)
 						}
-						return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"tokens":[{"id":"token-123"}],"pagination":{"total":1}}}`), nil
+						return jsonHTTPResponse(r, http.StatusOK, `{"success":true,"message":"ok","data":{"tokens":[{"uuid":"token-123","name":"readonly"}],"total":1}}`), nil
 					default:
 						t.Fatalf("unexpected request: %s %s", r.Method, r.URL.String())
 						return nil, nil
@@ -115,14 +115,14 @@ func TestListServiceAccountTokensUsesWorkspaceUUID(t *testing.T) {
 			var payload struct {
 				Data struct {
 					Tokens []struct {
-						ID string `json:"id"`
+						UUID string `json:"uuid"`
 					} `json:"tokens"`
 				} `json:"data"`
 			}
 			if err := json.Unmarshal([]byte(text), &payload); err != nil {
 				t.Fatalf("decode MCP result: %v", err)
 			}
-			if len(payload.Data.Tokens) != 1 || payload.Data.Tokens[0].ID != "token-123" {
+			if len(payload.Data.Tokens) != 1 || payload.Data.Tokens[0].UUID != "token-123" {
 				t.Fatalf("tokens = %#v, want token-123", payload.Data.Tokens)
 			}
 		})
