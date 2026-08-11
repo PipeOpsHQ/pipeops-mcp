@@ -65,6 +65,7 @@ type createGitOpsApplicationArgs struct {
 
 type updateGitOpsApplicationArgs struct {
 	ApplicationUUID     string `json:"application_uuid"`
+	WorkspaceID         string `json:"workspace_id,omitempty"`
 	Name                string `json:"name,omitempty"`
 	Branch              string `json:"branch,omitempty"`
 	Path                string `json:"path,omitempty"`
@@ -78,6 +79,7 @@ type updateGitOpsApplicationArgs struct {
 
 type syncGitOpsApplicationArgs struct {
 	ApplicationUUID string `json:"application_uuid"`
+	WorkspaceID     string `json:"workspace_id,omitempty"`
 	Revision        string `json:"revision,omitempty"`
 	Prune           bool   `json:"prune,omitempty"`
 	DryRun          bool   `json:"dry_run,omitempty"`
@@ -85,6 +87,7 @@ type syncGitOpsApplicationArgs struct {
 
 type getGitOpsHistoryArgs struct {
 	ApplicationUUID string `json:"application_uuid"`
+	WorkspaceID     string `json:"workspace_id,omitempty"`
 	Page            int    `json:"page,omitempty"`
 	Limit           int    `json:"limit,omitempty"`
 }
@@ -1096,11 +1099,16 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
-				Name:        "add_addon_domain",
-				Description: "Add a custom domain to an add-on",
+				Name: "add_addon_domain",
+				Description: "Add a custom domain to an add-on deployment. The controller requires " +
+					"network_uuid or network_port so the domain attaches to a specific network target " +
+					"(e.g. Redis 6379). Prefer network_uuid from the add-on's existingNetworkPorts.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"addon_id": stringProperty("The add-on ID or UUID"),
-					"domain":   stringProperty("The custom domain to attach"),
+					"addon_id":     stringProperty("The add-on deployment ID or UUID"),
+					"domain":       stringProperty("The custom domain to attach"),
+					"network_uuid": stringProperty("Optional network UUID from the add-on's existingNetworkPorts"),
+					"network_port": integerProperty("Optional network port (used when network_uuid is omitted; e.g. 6379 for Redis)"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
 				}, "addon_id", "domain"),
 			},
 			handler: s.addAddOnDomainTool,
@@ -1523,9 +1531,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_gitops_application",
-				Description: "Get a GitOps application configuration by UUID",
+				Description: "Get a GitOps application configuration by UUID. Requires workspace scope (defaults to first workspace when workspace_id is omitted).",
 				InputSchema: objectSchema(map[string]interface{}{
 					"application_uuid": stringProperty("The GitOps application UUID"),
+					"workspace_id":     stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
 				}, "application_uuid"),
 			},
 			handler: s.getGitOpsApplicationTool,
@@ -1556,9 +1565,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "update_gitops_application",
-				Description: "Update a GitOps application configuration",
+				Description: "Update a GitOps application configuration. Requires workspace scope (defaults to first workspace when workspace_id is omitted).",
 				InputSchema: objectSchema(map[string]interface{}{
 					"application_uuid":      stringProperty("The GitOps application UUID"),
+					"workspace_id":          stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
 					"name":                  stringProperty("Updated application name"),
 					"branch":                stringProperty("Updated git branch"),
 					"path":                  stringProperty("Updated path within the repository"),
@@ -1575,9 +1585,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "delete_gitops_application",
-				Description: "Delete a GitOps application configuration",
+				Description: "Delete a GitOps application configuration. Requires workspace scope (defaults to first workspace when workspace_id is omitted).",
 				InputSchema: objectSchema(map[string]interface{}{
 					"application_uuid": stringProperty("The GitOps application UUID to delete"),
+					"workspace_id":     stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
 				}, "application_uuid"),
 			},
 			handler: s.deleteGitOpsApplicationTool,
@@ -1585,9 +1596,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "sync_gitops_application",
-				Description: "Trigger a manual sync for a GitOps application",
+				Description: "Trigger a manual sync for a GitOps application. Requires workspace scope (defaults to first workspace when workspace_id is omitted).",
 				InputSchema: objectSchema(map[string]interface{}{
 					"application_uuid": stringProperty("The GitOps application UUID"),
+					"workspace_id":     stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
 					"revision":         stringProperty("Optional revision to sync"),
 					"prune":            booleanProperty("Whether to prune resources during sync"),
 					"dry_run":          booleanProperty("Whether to perform a dry-run sync"),
@@ -1598,9 +1610,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_gitops_sync_status",
-				Description: "Get the current sync and health status for a GitOps application",
+				Description: "Get the current sync and health status for a GitOps application. Requires workspace scope (defaults to first workspace when workspace_id is omitted).",
 				InputSchema: objectSchema(map[string]interface{}{
 					"application_uuid": stringProperty("The GitOps application UUID"),
+					"workspace_id":     stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
 				}, "application_uuid"),
 			},
 			handler: s.getGitOpsSyncStatusTool,
@@ -1608,9 +1621,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_gitops_diff",
-				Description: "Get the git vs live-state diff for a GitOps application",
+				Description: "Get the git vs live-state diff for a GitOps application. Requires workspace scope (defaults to first workspace when workspace_id is omitted).",
 				InputSchema: objectSchema(map[string]interface{}{
 					"application_uuid": stringProperty("The GitOps application UUID"),
+					"workspace_id":     stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
 				}, "application_uuid"),
 			},
 			handler: s.getGitOpsDiffTool,
@@ -1618,9 +1632,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_gitops_history",
-				Description: "Get paginated sync history for a GitOps application",
+				Description: "Get paginated sync history for a GitOps application. Requires workspace scope (defaults to first workspace when workspace_id is omitted).",
 				InputSchema: objectSchema(map[string]interface{}{
 					"application_uuid": stringProperty("The GitOps application UUID"),
+					"workspace_id":     stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
 					"page":             integerProperty("Optional page number"),
 					"limit":            integerProperty("Optional page size"),
 				}, "application_uuid"),
@@ -1834,9 +1849,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "get_service_account_token",
-				Description: "Get detailed information about a service account token",
+				Description: "Get detailed information about a service account token. Requires workspace scope (defaults to first workspace when workspace_id is omitted).",
 				InputSchema: objectSchema(map[string]interface{}{
-					"token_id": stringProperty("The service account token ID or UUID"),
+					"token_id":     stringProperty("The service account token ID or UUID"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
 				}, "token_id"),
 			},
 			handler: s.getServiceAccountTokenTool,
@@ -1859,13 +1875,14 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "update_service_account_token",
-				Description: "Update a service account token",
+				Description: "Update a service account token. Requires workspace scope (defaults to first workspace when workspace_id is omitted).",
 				InputSchema: objectSchema(map[string]interface{}{
-					"token_id":    stringProperty("The service account token ID or UUID"),
-					"name":        stringProperty("Updated service account token name"),
-					"description": stringProperty("Updated service account token description"),
-					"permissions": stringArrayProperty("Updated permissions for the token"),
-					"is_active":   booleanProperty("Whether the token should remain active"),
+					"token_id":     stringProperty("The service account token ID or UUID"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
+					"name":         stringProperty("Updated service account token name"),
+					"description":  stringProperty("Updated service account token description"),
+					"permissions":  stringArrayProperty("Updated permissions for the token"),
+					"is_active":    booleanProperty("Whether the token should remain active"),
 				}, "token_id"),
 			},
 			handler: s.updateServiceAccountTokenTool,
@@ -1873,9 +1890,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name:        "revoke_service_account_token",
-				Description: "Revoke a service account token",
+				Description: "Revoke a service account token. Requires workspace scope (defaults to first workspace when workspace_id is omitted).",
 				InputSchema: objectSchema(map[string]interface{}{
-					"token_id": stringProperty("The service account token ID or UUID"),
+					"token_id":     stringProperty("The service account token ID or UUID"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID; defaults to the first available workspace"),
 				}, "token_id"),
 			},
 			handler: s.revokeServiceAccountTokenTool,
@@ -2957,8 +2975,11 @@ type addOnDeploymentSessionArgs struct {
 }
 
 type addOnDomainArgs struct {
-	AddOnID string `json:"addon_id"`
-	Domain  string `json:"domain"`
+	AddOnID     string `json:"addon_id"`
+	Domain      string `json:"domain"`
+	NetworkUUID string `json:"network_uuid,omitempty"`
+	NetworkPort int32  `json:"network_port,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 type listAddOnsArgs struct {
@@ -3093,6 +3114,7 @@ type billingCardIDArgs struct {
 
 type updateServiceAccountTokenArgs struct {
 	TokenID     string   `json:"token_id"`
+	WorkspaceID string   `json:"workspace_id,omitempty"`
 	Name        string   `json:"name,omitempty"`
 	Description string   `json:"description,omitempty"`
 	Permissions []string `json:"permissions,omitempty"`
@@ -6826,8 +6848,17 @@ func (s *Server) addAddOnDomainTool(ctx context.Context, args map[string]interfa
 	if req.Domain == "" {
 		return nil, fmt.Errorf("domain is required")
 	}
+	if strings.TrimSpace(req.NetworkUUID) == "" && req.NetworkPort <= 0 {
+		return nil, fmt.Errorf("network_uuid or network_port is required (controller attaches the domain to an add-on network target)")
+	}
 
-	if _, err := s.client.AddOns.AddDomain(ctx, req.AddOnID, &pipeops.DomainRequest{Domain: req.Domain}); err != nil {
+	body := &pipeops.AddonDomainRequest{
+		Action:      "create",
+		Value:       strings.TrimSpace(req.Domain),
+		NetworkUUID: strings.TrimSpace(req.NetworkUUID),
+		NetworkPort: req.NetworkPort,
+	}
+	if _, err := s.client.AddOns.AlterDomain(ctx, req.AddOnID, body); err != nil {
 		return nil, err
 	}
 	return textResult("Add-on domain added successfully"), nil
@@ -7481,13 +7512,21 @@ func (s *Server) listInvoicesTool(ctx context.Context, _ map[string]interface{})
 	return jsonResult(normalizeCollectionResponse(resp, "invoices"))
 }
 
-func (s *Server) listServiceAccountTokensTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+func (s *Server) serviceTokenWorkspaceOptions(ctx context.Context, args map[string]interface{}) (*pipeops.ServiceTokenWorkspaceOptions, error) {
 	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
 	if err != nil {
 		return nil, err
 	}
+	return &pipeops.ServiceTokenWorkspaceOptions{WorkspaceUUID: workspaceUUID}, nil
+}
 
-	resp, err := s.requestJSON(ctx, http.MethodGet, withWorkspaceUUIDQuery("api/v1/service-account-tokens", workspaceUUID), nil)
+func (s *Server) listServiceAccountTokensTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	opts, err := s.serviceTokenWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, _, err := s.client.ServiceTokens.ListServiceAccountTokens(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -7499,8 +7538,12 @@ func (s *Server) getServiceAccountTokenTool(ctx context.Context, args map[string
 	if err != nil {
 		return nil, err
 	}
+	opts, err := s.serviceTokenWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 
-	resp, _, err := s.client.ServiceTokens.GetServiceAccountToken(ctx, tokenID)
+	resp, _, err := s.client.ServiceTokens.GetServiceAccountToken(ctx, tokenID, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -7549,13 +7592,17 @@ func (s *Server) updateServiceAccountTokenTool(ctx context.Context, args map[str
 	if req.TokenID == "" {
 		return nil, fmt.Errorf("token_id is required")
 	}
+	opts, err := s.serviceTokenWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 
 	resp, _, err := s.client.ServiceTokens.UpdateServiceAccountToken(ctx, req.TokenID, &pipeops.ServiceAccountTokenUpdateRequest{
 		Name:        req.Name,
 		Description: req.Description,
 		Permissions: req.Permissions,
 		IsActive:    req.IsActive,
-	})
+	}, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -7567,8 +7614,12 @@ func (s *Server) revokeServiceAccountTokenTool(ctx context.Context, args map[str
 	if err != nil {
 		return nil, err
 	}
+	opts, err := s.serviceTokenWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 
-	if _, err := s.client.ServiceTokens.RevokeServiceAccountToken(ctx, tokenID); err != nil {
+	if _, err := s.client.ServiceTokens.RevokeServiceAccountToken(ctx, tokenID, opts); err != nil {
 		return nil, err
 	}
 	return textResult("Service account token revoked successfully"), nil
@@ -7608,13 +7659,25 @@ func (s *Server) listGitOpsApplicationsTool(ctx context.Context, args map[string
 	return jsonResult(resp)
 }
 
+func (s *Server) gitOpsWorkspaceOptions(ctx context.Context, args map[string]interface{}) (*pipeops.GitOpsWorkspaceOptions, error) {
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w (pass workspace_id)", err)
+	}
+	return &pipeops.GitOpsWorkspaceOptions{WorkspaceUUID: workspaceUUID}, nil
+}
+
 func (s *Server) getGitOpsApplicationTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
 	applicationUUID, err := requiredString(args, "application_uuid")
 	if err != nil {
 		return nil, err
 	}
+	opts, err := s.gitOpsWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 
-	resp, _, err := s.client.GitOps.Get(ctx, applicationUUID)
+	resp, _, err := s.client.GitOps.Get(ctx, applicationUUID, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -7666,6 +7729,10 @@ func (s *Server) updateGitOpsApplicationTool(ctx context.Context, args map[strin
 	if strings.TrimSpace(req.ApplicationUUID) == "" {
 		return nil, fmt.Errorf("application_uuid is required")
 	}
+	opts, err := s.gitOpsWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 
 	resp, _, err := s.client.GitOps.Update(ctx, strings.TrimSpace(req.ApplicationUUID), &pipeops.UpdateGitOpsConfigRequest{
 		Name:                strings.TrimSpace(req.Name),
@@ -7675,7 +7742,7 @@ func (s *Server) updateGitOpsApplicationTool(ctx context.Context, args map[strin
 		SyncPolicy:          gitOpsAutomatedSyncPolicy(req.AutoSyncPrune, req.AutoSyncSelfHeal, req.AutoSyncAllowEmpty),
 		HealthCheckEnabled:  req.HealthCheckEnabled,
 		HealthCheckInterval: req.HealthCheckInterval,
-	})
+	}, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -7687,8 +7754,12 @@ func (s *Server) deleteGitOpsApplicationTool(ctx context.Context, args map[strin
 	if err != nil {
 		return nil, err
 	}
+	opts, err := s.gitOpsWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 
-	if _, err := s.client.GitOps.Delete(ctx, applicationUUID); err != nil {
+	if _, err := s.client.GitOps.Delete(ctx, applicationUUID, opts); err != nil {
 		return nil, err
 	}
 	return textResult("GitOps application deleted successfully"), nil
@@ -7702,12 +7773,16 @@ func (s *Server) syncGitOpsApplicationTool(ctx context.Context, args map[string]
 	if strings.TrimSpace(req.ApplicationUUID) == "" {
 		return nil, fmt.Errorf("application_uuid is required")
 	}
+	opts, err := s.gitOpsWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 
 	resp, _, err := s.client.GitOps.TriggerSync(ctx, strings.TrimSpace(req.ApplicationUUID), &pipeops.TriggerGitOpsSyncRequest{
 		Revision: strings.TrimSpace(req.Revision),
 		Prune:    req.Prune,
 		DryRun:   req.DryRun,
-	})
+	}, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -7719,8 +7794,12 @@ func (s *Server) getGitOpsSyncStatusTool(ctx context.Context, args map[string]in
 	if err != nil {
 		return nil, err
 	}
+	opts, err := s.gitOpsWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 
-	resp, _, err := s.client.GitOps.GetSyncStatus(ctx, applicationUUID)
+	resp, _, err := s.client.GitOps.GetSyncStatus(ctx, applicationUUID, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -7732,8 +7811,12 @@ func (s *Server) getGitOpsDiffTool(ctx context.Context, args map[string]interfac
 	if err != nil {
 		return nil, err
 	}
+	opts, err := s.gitOpsWorkspaceOptions(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 
-	resp, _, err := s.client.GitOps.GetDiff(ctx, applicationUUID)
+	resp, _, err := s.client.GitOps.GetDiff(ctx, applicationUUID, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -7748,10 +7831,15 @@ func (s *Server) getGitOpsHistoryTool(ctx context.Context, args map[string]inter
 	if strings.TrimSpace(req.ApplicationUUID) == "" {
 		return nil, fmt.Errorf("application_uuid is required")
 	}
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w (pass workspace_id)", err)
+	}
 
 	resp, _, err := s.client.GitOps.GetHistory(ctx, strings.TrimSpace(req.ApplicationUUID), &pipeops.GitOpsListOptions{
-		Page:  req.Page,
-		Limit: req.Limit,
+		Page:          req.Page,
+		Limit:         req.Limit,
+		WorkspaceUUID: workspaceUUID,
 	})
 	if err != nil {
 		return nil, err
