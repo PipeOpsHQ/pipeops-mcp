@@ -396,6 +396,49 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
+				Name: "list_project_audit_logs",
+				Description: "List historical actions for a project (who redeployed, changed env, paused, etc.). " +
+					"Uses control-plane project audit logs. Prefer this for questions like " +
+					"'who deployed X' or 'what changed on this project last week'.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"project_id":      stringProperty("The project ID, UUID, name, or slug"),
+					"workspace_id":    stringProperty("Optional workspace ID or UUID override for project resolution"),
+					"action":          stringProperty("Optional action filter (comma-separated), e.g. project.redeploy,project.env.update"),
+					"actor_type":      stringProperty("Optional actor type: user, webhook, system, service_account, agent"),
+					"actor_user_uuid": stringProperty("Optional actor user UUID filter"),
+					"category":        stringProperty("Optional category: lifecycle, settings, deployment, security, access"),
+					"search":          stringProperty("Optional free-text search over summary/names"),
+					"from":            stringProperty("Optional start time (RFC3339)"),
+					"to":              stringProperty("Optional end time (RFC3339)"),
+					"limit":           integerProperty("Optional page size (default 20)"),
+					"offset":          integerProperty("Optional offset for pagination"),
+				}, "project_id"),
+			},
+			handler: s.listProjectAuditLogsTool,
+		},
+		{
+			tool: Tool{
+				Name: "list_workspace_audit_logs",
+				Description: "List historical actions across all projects in a workspace. " +
+					"Use for workspace-wide activity timelines; pass project_id to narrow to one project.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"workspace_id":    stringProperty("Workspace ID or UUID (defaults to first workspace when omitted)"),
+					"project_id":      stringProperty("Optional project UUID to filter within the workspace"),
+					"action":          stringProperty("Optional action filter (comma-separated)"),
+					"actor_type":      stringProperty("Optional actor type: user, webhook, system, service_account, agent"),
+					"actor_user_uuid": stringProperty("Optional actor user UUID filter"),
+					"category":        stringProperty("Optional category: lifecycle, settings, deployment, security, access"),
+					"search":          stringProperty("Optional free-text search over summary/names"),
+					"from":            stringProperty("Optional start time (RFC3339)"),
+					"to":              stringProperty("Optional end time (RFC3339)"),
+					"limit":           integerProperty("Optional page size (default 20)"),
+					"offset":          integerProperty("Optional offset for pagination"),
+				}),
+			},
+			handler: s.listWorkspaceAuditLogsTool,
+		},
+		{
+			tool: Tool{
 				Name:        "search_project_deployments",
 				Description: "Search project deployments for a project by SHA, status, commit message, URL, or related values",
 				InputSchema: objectSchema(map[string]interface{}{
@@ -5117,6 +5160,118 @@ func (s *Server) listProjectDeploymentHistoryTool(ctx context.Context, args map[
 		return nil, err
 	}
 	return jsonResult(attachProjectToCollectionResponse(resp, project))
+}
+
+type projectAuditLogsArgs struct {
+	ProjectID     string `json:"project_id"`
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	Action        string `json:"action,omitempty"`
+	ActorType     string `json:"actor_type,omitempty"`
+	ActorUserUUID string `json:"actor_user_uuid,omitempty"`
+	Category      string `json:"category,omitempty"`
+	Search        string `json:"search,omitempty"`
+	From          string `json:"from,omitempty"`
+	To            string `json:"to,omitempty"`
+	Limit         int    `json:"limit,omitempty"`
+	Offset        int    `json:"offset,omitempty"`
+}
+
+type workspaceAuditLogsArgs struct {
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	ProjectID     string `json:"project_id,omitempty"`
+	Action        string `json:"action,omitempty"`
+	ActorType     string `json:"actor_type,omitempty"`
+	ActorUserUUID string `json:"actor_user_uuid,omitempty"`
+	Category      string `json:"category,omitempty"`
+	Search        string `json:"search,omitempty"`
+	From          string `json:"from,omitempty"`
+	To            string `json:"to,omitempty"`
+	Limit         int    `json:"limit,omitempty"`
+	Offset        int    `json:"offset,omitempty"`
+}
+
+func projectUUIDFromReference(project map[string]interface{}, fallback string) string {
+	if project != nil {
+		for _, key := range []string{"uuid", "UUID", "id", "ID"} {
+			if v, ok := project[key].(string); ok && strings.TrimSpace(v) != "" {
+				return strings.TrimSpace(v)
+			}
+		}
+	}
+	return strings.TrimSpace(fallback)
+}
+
+func (s *Server) listProjectAuditLogsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req projectAuditLogsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(req.ProjectID) == "" {
+		return nil, fmt.Errorf("project_id is required")
+	}
+
+	projectUUID := strings.TrimSpace(req.ProjectID)
+	// Resolve name/slug → UUID when possible so audit route (project uuid) works.
+	if _, project, err := s.findProjectReferenceWithFallback(ctx, req.ProjectID, req.WorkspaceID, true); err == nil && project != nil {
+		if resolved := projectUUIDFromReference(project, ""); resolved != "" {
+			projectUUID = resolved
+		}
+	}
+
+	resp, _, err := s.client.AuditLogs.ListProject(ctx, projectUUID, &pipeops.ProjectAuditLogListOptions{
+		Action:        strings.TrimSpace(req.Action),
+		ActorUserUUID: strings.TrimSpace(req.ActorUserUUID),
+		ActorType:     strings.TrimSpace(req.ActorType),
+		Category:      strings.TrimSpace(req.Category),
+		Search:        strings.TrimSpace(req.Search),
+		From:          strings.TrimSpace(req.From),
+		To:            strings.TrimSpace(req.To),
+		Limit:         req.Limit,
+		Offset:        req.Offset,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) listWorkspaceAuditLogsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req workspaceAuditLogsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w (pass workspace_id)", err)
+	}
+
+	projectUUID := strings.TrimSpace(req.ProjectID)
+	if projectUUID != "" {
+		if _, project, findErr := s.findProjectReferenceWithFallback(ctx, req.ProjectID, workspaceUUID, true); findErr == nil && project != nil {
+			if resolved := projectUUIDFromReference(project, ""); resolved != "" {
+				projectUUID = resolved
+			}
+		}
+	}
+
+	resp, _, err := s.client.AuditLogs.ListWorkspace(ctx, &pipeops.WorkspaceAuditLogListOptions{
+		WorkspaceUUID: workspaceUUID,
+		ProjectUUID:   projectUUID,
+		Action:        strings.TrimSpace(req.Action),
+		ActorUserUUID: strings.TrimSpace(req.ActorUserUUID),
+		ActorType:     strings.TrimSpace(req.ActorType),
+		Category:      strings.TrimSpace(req.Category),
+		Search:        strings.TrimSpace(req.Search),
+		From:          strings.TrimSpace(req.From),
+		To:            strings.TrimSpace(req.To),
+		Limit:         req.Limit,
+		Offset:        req.Offset,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
 }
 
 func (s *Server) searchProjectDeploymentsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
