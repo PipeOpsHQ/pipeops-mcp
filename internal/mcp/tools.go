@@ -1971,15 +1971,18 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name: "create_ai_review_fix_pr",
-				Description: "Start a PipeOps bot job that applies AI review findings and opens a GitHub fix PR " +
-					"targeting the PR source branch. Returns a fix job (uuid + status). " +
-					"Poll get_ai_review_fix_job until completed/failed; completed jobs include pr_url.",
+				Description: "Apply AI review findings and open a GitHub fix PR as PipeOps[bot] " +
+					"(targets the PR source branch). By default this tool WAITS for the job to finish " +
+					"(up to ~3 minutes) and returns the final status including pr_url on success. " +
+					"Set wait=false to only enqueue and get a job uuid, then poll get_ai_review_fix_job. " +
+					"Do not stop after a queued response unless wait=false.",
 				InputSchema: objectSchema(map[string]interface{}{
-					"project_id":       stringProperty("Project ID, UUID, name, or slug"),
-					"review_uuid":      stringProperty("AI review UUID to fix"),
-					"finding_indexes":  integerArrayProperty("Optional 0-based finding indexes to apply; omit to apply all actionable findings"),
-					"mode":             stringProperty("Optional mode (default branch_pr)"),
-					"workspace_id":     stringProperty("Optional workspace ID or UUID override"),
+					"project_id":      stringProperty("Project ID, UUID, name, or slug"),
+					"review_uuid":     stringProperty("AI review UUID to fix"),
+					"finding_indexes": integerArrayProperty("Optional 0-based finding indexes to apply; omit to apply all actionable findings"),
+					"mode":            stringProperty("Optional mode (default branch_pr)"),
+					"wait":            booleanProperty("Wait for job completion (default true). Set false to return immediately with job uuid."),
+					"workspace_id":    stringProperty("Optional workspace ID or UUID override"),
 				}, "project_id", "review_uuid"),
 			},
 			handler: s.createAIReviewFixPRTool,
@@ -8466,7 +8469,9 @@ type createAIReviewFixPRArgs struct {
 	ReviewUUID     string `json:"review_uuid"`
 	FindingIndexes []int  `json:"finding_indexes,omitempty"`
 	Mode           string `json:"mode,omitempty"`
-	WorkspaceID    string `json:"workspace_id,omitempty"`
+	// Wait defaults to true when omitted (nil). false skips polling.
+	Wait        *bool  `json:"wait,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 type getAIReviewFixJobArgs struct {
@@ -8614,7 +8619,122 @@ func (s *Server) createAIReviewFixPRTool(ctx context.Context, args map[string]in
 	if err != nil {
 		return nil, err
 	}
-	return jsonResult(resp)
+
+	// Default: wait so agents don't stop after "queued" without a pr_url.
+	wait := true
+	if req.Wait != nil {
+		wait = *req.Wait
+	}
+	if !wait {
+		return jsonResult(resp)
+	}
+
+	jobUUID := extractAIReviewFixJobUUID(resp)
+	if jobUUID == "" {
+		// Still return create response if shape is unexpected.
+		return jsonResult(map[string]interface{}{
+			"success": true,
+			"message": "Fix PR job started but job uuid missing from response — call get_ai_review_fix_job if you have a uuid",
+			"data":    resp,
+		})
+	}
+
+	final, pollErr := s.pollAIReviewFixJob(ctx, jobUUID, workspaceUUID)
+	if pollErr != nil {
+		out := map[string]interface{}{
+			"success":         false,
+			"message":         pollErr.Error(),
+			"create_response": resp,
+		}
+		if final != nil {
+			out["poll"] = final
+			if data, ok := final["data"]; ok {
+				out["data"] = data
+			}
+		}
+		if out["data"] == nil {
+			out["data"] = map[string]interface{}{
+				"uuid":   jobUUID,
+				"status": "unknown",
+			}
+		}
+		// Still return structured JSON so the agent can read status/error_message.
+		return jsonResult(out)
+	}
+	return jsonResult(final)
+}
+
+func extractAIReviewFixJobUUID(resp map[string]interface{}) string {
+	if resp == nil {
+		return ""
+	}
+	// Standard controller envelope: { success, data: { uuid, status, ... } }
+	if data, ok := resp["data"].(map[string]interface{}); ok {
+		if u := firstNonEmptyString(
+			extractString(lookupValue(data, "uuid", "UUID")),
+			extractString(lookupValue(data, "job_uuid", "jobUUID")),
+		); u != "" {
+			return u
+		}
+	}
+	return firstNonEmptyString(
+		extractString(lookupValue(resp, "uuid", "UUID")),
+		extractString(lookupValue(resp, "job_uuid", "jobUUID")),
+	)
+}
+
+// pollAIReviewFixJob waits until the fix job is completed or failed (or timeout).
+func (s *Server) pollAIReviewFixJob(ctx context.Context, jobUUID, workspaceUUID string) (map[string]interface{}, error) {
+	const (
+		interval = 3 * time.Second
+		// LLM apply + GitHub writes can take a couple of minutes.
+		maxWait = 3 * time.Minute
+	)
+	deadline := time.Now().Add(maxWait)
+	path := withWorkspaceUUIDQuery(
+		fmt.Sprintf("api/v1/ai-reviews/fix-jobs/%s", url.PathEscape(jobUUID)),
+		workspaceUUID,
+	)
+
+	var last map[string]interface{}
+	for {
+		if err := ctx.Err(); err != nil {
+			return last, fmt.Errorf("cancelled while waiting for fix job %s: %w", jobUUID, err)
+		}
+		resp, err := s.requestJSON(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return last, fmt.Errorf("poll fix job %s: %w", jobUUID, err)
+		}
+		last = resp
+		status := strings.ToLower(strings.TrimSpace(extractAIReviewFixJobStatus(resp)))
+		switch status {
+		case "completed", "failed":
+			return resp, nil
+		}
+		if time.Now().After(deadline) {
+			return resp, fmt.Errorf(
+				"fix job %s still %q after %s — call get_ai_review_fix_job again; do not assume success",
+				jobUUID, status, maxWait,
+			)
+		}
+		select {
+		case <-ctx.Done():
+			return last, fmt.Errorf("cancelled while waiting for fix job %s: %w", jobUUID, ctx.Err())
+		case <-time.After(interval):
+		}
+	}
+}
+
+func extractAIReviewFixJobStatus(resp map[string]interface{}) string {
+	if resp == nil {
+		return ""
+	}
+	if data, ok := resp["data"].(map[string]interface{}); ok {
+		if s := extractString(lookupValue(data, "status", "Status")); s != "" {
+			return s
+		}
+	}
+	return extractString(lookupValue(resp, "status", "Status"))
 }
 
 func (s *Server) getAIReviewFixJobTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {

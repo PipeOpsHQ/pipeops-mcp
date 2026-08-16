@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -132,6 +133,7 @@ func TestAIReviewToolsCallControllerPaths(t *testing.T) {
 	if _, err := server.createAIReviewFixPRTool(ctx, map[string]interface{}{
 		"project_id":  projectUUID,
 		"review_uuid": reviewUUID,
+		"wait":        false, // path test only; wait covered in TestCreateAIReviewFixPRWaitsForCompletion
 	}); err != nil {
 		t.Fatalf("createAIReviewFixPRTool: %v", err)
 	}
@@ -170,9 +172,10 @@ func TestCreateAIReviewFixPRBody(t *testing.T) {
 	}
 	client.SetHTTPClient(&http.Client{
 		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
-			if r.Body != nil {
+			if r.Method == http.MethodPost && r.Body != nil {
 				_ = json.NewDecoder(r.Body).Decode(&gotBody)
 			}
+			// wait=false path: only create is called
 			return &http.Response{
 				StatusCode: http.StatusAccepted,
 				Header:     make(http.Header),
@@ -184,11 +187,13 @@ func TestCreateAIReviewFixPRBody(t *testing.T) {
 	client.SetToken("sat_test")
 
 	server := &Server{client: client}
+	waitFalse := false
 	if _, err := server.createAIReviewFixPRTool(context.Background(), map[string]interface{}{
 		"project_id":      "11111111-1111-1111-1111-111111111111",
 		"review_uuid":     "22222222-2222-2222-2222-222222222222",
 		"finding_indexes": []interface{}{0, 2},
 		"mode":            "branch_pr",
+		"wait":            waitFalse,
 	}); err != nil {
 		t.Fatalf("createAIReviewFixPRTool: %v", err)
 	}
@@ -199,5 +204,68 @@ func TestCreateAIReviewFixPRBody(t *testing.T) {
 	indexes, ok := gotBody["finding_indexes"].([]interface{})
 	if !ok || len(indexes) != 2 {
 		t.Fatalf("finding_indexes = %#v, want [0,2]", gotBody["finding_indexes"])
+	}
+}
+
+func TestCreateAIReviewFixPRWaitsForCompletion(t *testing.T) {
+	t.Parallel()
+
+	const jobUUID = "33333333-3333-3333-3333-333333333333"
+	polls := 0
+	client, err := pipeops.NewClient("https://api.pipeops.test")
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	client.SetHTTPClient(&http.Client{
+		Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			switch {
+			case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "/fix-pr"):
+				return &http.Response{
+					StatusCode: http.StatusAccepted,
+					Header:     make(http.Header),
+					Body: io.NopCloser(strings.NewReader(
+						`{"success":true,"data":{"uuid":"` + jobUUID + `","status":"queued"}}`,
+					)),
+					Request: r,
+				}, nil
+			case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/fix-jobs/"):
+				polls++
+				status := "running"
+				if polls >= 2 {
+					status = "completed"
+				}
+				body := fmt.Sprintf(
+					`{"success":true,"data":{"uuid":"%s","status":"%s","pr_url":"https://github.com/o/r/pull/9"}}`,
+					jobUUID, status,
+				)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(body)),
+					Request:    r,
+				}, nil
+			default:
+				t.Fatalf("unexpected %s %s", r.Method, r.URL.Path)
+				return nil, nil
+			}
+		}),
+	})
+	client.SetToken("sat_test")
+
+	server := &Server{client: client}
+	result, err := server.createAIReviewFixPRTool(context.Background(), map[string]interface{}{
+		"project_id":  "11111111-1111-1111-1111-111111111111",
+		"review_uuid": "22222222-2222-2222-2222-222222222222",
+		// wait default true
+	})
+	if err != nil {
+		t.Fatalf("createAIReviewFixPRTool: %v", err)
+	}
+	if polls < 2 {
+		t.Fatalf("expected at least 2 polls, got %d", polls)
+	}
+	// jsonResult wraps as MCP content; just ensure no error and tool returned.
+	if result == nil {
+		t.Fatal("expected result")
 	}
 }
