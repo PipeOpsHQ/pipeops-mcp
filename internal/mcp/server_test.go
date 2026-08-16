@@ -156,6 +156,10 @@ func TestHandleToolsList(t *testing.T) {
 		"list_sandbox_files",
 		"read_sandbox_file",
 		"get_sandbox_usage",
+		"get_ai_review",
+		"list_ai_reviews",
+		"create_ai_review_fix_pr",
+		"get_ai_review_fix_job",
 	}
 
 	for _, expected := range expectedTools {
