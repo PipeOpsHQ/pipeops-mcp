@@ -1941,6 +1941,61 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			},
 			handler: s.revokeServiceAccountTokenTool,
 		},
+		// AI PR review — console "Fix with Ora" / open fix PR flow.
+		{
+			tool: Tool{
+				Name: "get_ai_review",
+				Description: "Get a single PipeOps AI code review by UUID, including summary, findings, " +
+					"actions (fix_with_ora / create_fix_pr), and redacted diff when still retained. " +
+					"Use before applying fixes or calling create_ai_review_fix_pr.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"review_uuid":  stringProperty("AI review UUID from the console or list_ai_reviews"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "review_uuid"),
+			},
+			handler: s.getAIReviewTool,
+		},
+		{
+			tool: Tool{
+				Name: "list_ai_reviews",
+				Description: "List recent AI code reviews for a project (newest first). " +
+					"Returns status, PR number, finding_count, and review UUIDs for get_ai_review.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"project_id":   stringProperty("Project ID, UUID, name, or slug"),
+					"limit":        integerProperty("Optional max reviews (default 50, max 100)"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "project_id"),
+			},
+			handler: s.listAIReviewsTool,
+		},
+		{
+			tool: Tool{
+				Name: "create_ai_review_fix_pr",
+				Description: "Start a PipeOps bot job that applies AI review findings and opens a GitHub fix PR " +
+					"targeting the PR source branch. Returns a fix job (uuid + status). " +
+					"Poll get_ai_review_fix_job until completed/failed; completed jobs include pr_url.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"project_id":       stringProperty("Project ID, UUID, name, or slug"),
+					"review_uuid":      stringProperty("AI review UUID to fix"),
+					"finding_indexes":  integerArrayProperty("Optional 0-based finding indexes to apply; omit to apply all actionable findings"),
+					"mode":             stringProperty("Optional mode (default branch_pr)"),
+					"workspace_id":     stringProperty("Optional workspace ID or UUID override"),
+				}, "project_id", "review_uuid"),
+			},
+			handler: s.createAIReviewFixPRTool,
+		},
+		{
+			tool: Tool{
+				Name: "get_ai_review_fix_job",
+				Description: "Get status of an AI review fix-PR job started by create_ai_review_fix_pr. " +
+					"Statuses: queued, running, completed, failed. On completed, data.pr_url is the fix PR.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"job_uuid":     stringProperty("Fix job UUID from create_ai_review_fix_pr"),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
+				}, "job_uuid"),
+			},
+			handler: s.getAIReviewFixJobTool,
+		},
 	}
 }
 
@@ -2205,6 +2260,16 @@ func stringArrayProperty(description string) map[string]interface{} {
 		"description": description,
 		"items": map[string]interface{}{
 			"type": "string",
+		},
+	}
+}
+
+func integerArrayProperty(description string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":        "array",
+		"description": description,
+		"items": map[string]interface{}{
+			"type": "integer",
 		},
 	}
 }
@@ -8377,6 +8442,201 @@ func (s *Server) listProjectGroupCandidatesTool(ctx context.Context, args map[st
 		WorkspaceUUID: workspaceUUID,
 		GroupUUID:     strings.TrimSpace(req.GroupUUID),
 	})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+// ── AI PR review tools ──────────────────────────────────────────────────────
+
+type getAIReviewArgs struct {
+	ReviewUUID  string `json:"review_uuid"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type listAIReviewsArgs struct {
+	ProjectID   string `json:"project_id"`
+	Limit       int    `json:"limit,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+type createAIReviewFixPRArgs struct {
+	ProjectID      string `json:"project_id"`
+	ReviewUUID     string `json:"review_uuid"`
+	FindingIndexes []int  `json:"finding_indexes,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+}
+
+type getAIReviewFixJobArgs struct {
+	JobUUID     string `json:"job_uuid"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+}
+
+func (s *Server) resolveProjectUUIDForAIReview(ctx context.Context, projectID, workspaceID string) (string, string, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "", "", fmt.Errorf("project_id is required")
+	}
+
+	workspaceUUID := ""
+	if strings.TrimSpace(workspaceID) != "" {
+		ws, err := s.resolveWorkspaceReference(ctx, workspaceID)
+		if err != nil {
+			return "", "", err
+		}
+		workspaceUUID = projectWorkspaceUUID(nil, ws)
+	}
+
+	// Prefer direct UUID-style identifiers to avoid extra list calls.
+	if isLikelyDirectProjectIdentifier(projectID) {
+		return projectID, workspaceUUID, nil
+	}
+
+	workspace, project, err := s.findProjectReference(ctx, projectID, workspaceID)
+	if err != nil {
+		return "", "", err
+	}
+	uuid := firstNonEmptyString(
+		extractString(lookupValue(project, "uuid", "UUID")),
+		extractString(lookupValue(project, "id", "ID")),
+		projectID,
+	)
+	if workspaceUUID == "" {
+		workspaceUUID = projectWorkspaceUUID(project, workspace)
+	}
+	return uuid, workspaceUUID, nil
+}
+
+func (s *Server) optionalWorkspaceUUIDQuery(ctx context.Context, workspaceID string) (string, error) {
+	if strings.TrimSpace(workspaceID) == "" {
+		return "", nil
+	}
+	ws, err := s.resolveWorkspaceReference(ctx, workspaceID)
+	if err != nil {
+		return "", err
+	}
+	return projectWorkspaceUUID(nil, ws), nil
+}
+
+func (s *Server) getAIReviewTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req getAIReviewArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	reviewUUID := strings.TrimSpace(req.ReviewUUID)
+	if reviewUUID == "" {
+		return nil, fmt.Errorf("review_uuid is required")
+	}
+
+	workspaceUUID, err := s.optionalWorkspaceUUIDQuery(ctx, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	path := withWorkspaceUUIDQuery(
+		fmt.Sprintf("api/v1/ai-reviews/%s", url.PathEscape(reviewUUID)),
+		workspaceUUID,
+	)
+	resp, err := s.requestJSON(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) listAIReviewsTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req listAIReviewsArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+
+	projectUUID, workspaceUUID, err := s.resolveProjectUUIDForAIReview(ctx, req.ProjectID, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	path := withQueryValues(
+		fmt.Sprintf("api/v1/projects/%s/ai-reviews", url.PathEscape(projectUUID)),
+		map[string]string{
+			"limit":          fmt.Sprintf("%d", limit),
+			"workspace_uuid": workspaceUUID,
+		},
+	)
+	resp, err := s.requestJSON(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) createAIReviewFixPRTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req createAIReviewFixPRArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	reviewUUID := strings.TrimSpace(req.ReviewUUID)
+	if reviewUUID == "" {
+		return nil, fmt.Errorf("review_uuid is required")
+	}
+
+	projectUUID, workspaceUUID, err := s.resolveProjectUUIDForAIReview(ctx, req.ProjectID, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	body := map[string]interface{}{}
+	if len(req.FindingIndexes) > 0 {
+		body["finding_indexes"] = req.FindingIndexes
+	}
+	if mode := strings.TrimSpace(req.Mode); mode != "" {
+		body["mode"] = mode
+	}
+
+	path := withWorkspaceUUIDQuery(
+		fmt.Sprintf(
+			"api/v1/projects/%s/ai-reviews/%s/fix-pr",
+			url.PathEscape(projectUUID),
+			url.PathEscape(reviewUUID),
+		),
+		workspaceUUID,
+	)
+	resp, err := s.requestJSON(ctx, http.MethodPost, path, body)
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) getAIReviewFixJobTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	var req getAIReviewFixJobArgs
+	if err := decodeArguments(args, &req); err != nil {
+		return nil, err
+	}
+	jobUUID := strings.TrimSpace(req.JobUUID)
+	if jobUUID == "" {
+		return nil, fmt.Errorf("job_uuid is required")
+	}
+
+	workspaceUUID, err := s.optionalWorkspaceUUIDQuery(ctx, req.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	path := withWorkspaceUUIDQuery(
+		fmt.Sprintf("api/v1/ai-reviews/fix-jobs/%s", url.PathEscape(jobUUID)),
+		workspaceUUID,
+	)
+	resp, err := s.requestJSON(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, err
 	}
