@@ -8690,9 +8690,10 @@ func extractAIReviewFixJobUUID(resp map[string]interface{}) string {
 // pollAIReviewFixJob waits until the fix job is completed or failed (or timeout).
 func (s *Server) pollAIReviewFixJob(ctx context.Context, jobUUID, workspaceUUID string) (map[string]interface{}, error) {
 	const (
-		interval = 3 * time.Second
-		// LLM apply + GitHub writes can take a couple of minutes.
-		maxWait = 3 * time.Minute
+		interval = 2 * time.Second
+		// LLM apply + GitHub writes can take several minutes on large reviews.
+		// Heartbeats from Cortex keep the SSE stream open during this wait.
+		maxWait = 5 * time.Minute
 	)
 	deadline := time.Now().Add(maxWait)
 	path := withWorkspaceUUIDQuery(
