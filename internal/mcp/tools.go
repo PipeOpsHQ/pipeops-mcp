@@ -1971,18 +1971,22 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name: "create_ai_review_fix_pr",
-				Description: "Apply AI review findings and open a GitHub fix PR as PipeOps[bot] " +
-					"(targets the PR source branch). By default this tool WAITS for the job to finish " +
-					"(up to ~3 minutes) and returns the final status including pr_url on success. " +
-					"Set wait=false to only enqueue and get a job uuid, then poll get_ai_review_fix_job. " +
-					"Do not stop after a queued response unless wait=false.",
+				Description: "Apply AI review findings and open or CONTINUE a GitHub fix PR as PipeOps[bot] " +
+					"(targets the PR source branch). By default WAITS for the job (~3m) and returns pr_url. " +
+					"If a prior bot PR only fixed some findings, call again with finding_indexes set to the " +
+					"REMAINING indexes — the controller pushes more commits on the same ora/fix-pr branch " +
+					"and reuses the existing open fix PR. Do not stop after a plan or after status=queued; " +
+					"execute this tool. wait=false only enqueues (then poll get_ai_review_fix_job).",
 				InputSchema: objectSchema(map[string]interface{}{
-					"project_id":      stringProperty("Project ID, UUID, name, or slug"),
-					"review_uuid":     stringProperty("AI review UUID to fix"),
-					"finding_indexes": integerArrayProperty("Optional 0-based finding indexes to apply; omit to apply all actionable findings"),
-					"mode":            stringProperty("Optional mode (default branch_pr)"),
-					"wait":            booleanProperty("Wait for job completion (default true). Set false to return immediately with job uuid."),
-					"workspace_id":    stringProperty("Optional workspace ID or UUID override"),
+					"project_id":  stringProperty("Project ID, UUID, name, or slug"),
+					"review_uuid": stringProperty("AI review UUID to fix"),
+					"finding_indexes": integerArrayProperty(
+						"Optional 0-based finding indexes to apply. Omit for all remaining (skips indexes already applied on a prior completed bot fix job). " +
+							"To continue a partial PR, pass only the unfixed indexes e.g. [5,6,10,11,12,13,14,15,16].",
+					),
+					"mode":         stringProperty("Optional mode (default branch_pr)"),
+					"wait":         booleanProperty("Wait for job completion (default true). Set false to return immediately with job uuid."),
+					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
 				}, "project_id", "review_uuid"),
 			},
 			handler: s.createAIReviewFixPRTool,
