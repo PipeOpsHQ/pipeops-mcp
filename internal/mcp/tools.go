@@ -1946,10 +1946,8 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			tool: Tool{
 				Name: "get_ai_review",
 				Description: "Get a single PipeOps AI code review by UUID, including summary, findings, " +
-					"actions (fix_with_ora / create_fix_pr), fix_status (prior bot fix PRs / applied indexes / guidance), " +
-					"and redacted diff when still retained. ALWAYS call this before create_ai_review_fix_pr. " +
-					"If fix_status.all_findings_applied or remaining_finding_indexes is empty with has_completed_fix_pr, " +
-					"report fix_status.latest_job.pr_url and do NOT create another fix PR.",
+					"actions (fix_with_ora / create_fix_pr), and redacted diff when still retained. " +
+					"Use before applying fixes or calling create_ai_review_fix_pr.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"review_uuid":  stringProperty("AI review UUID from the console or list_ai_reviews"),
 					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
@@ -1961,8 +1959,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 			tool: Tool{
 				Name: "list_ai_reviews",
 				Description: "List recent AI code reviews for a project (newest first). " +
-					"Returns status, PR number, finding_count, review UUIDs, and fix_status " +
-					"(whether a bot fix PR already exists) for get_ai_review / create decisions.",
+					"Returns status, PR number, finding_count, and review UUIDs for get_ai_review.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"project_id":   stringProperty("Project ID, UUID, name, or slug"),
 					"limit":        integerProperty("Optional max reviews (default 50, max 100)"),
@@ -1976,12 +1973,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 				Name: "create_ai_review_fix_pr",
 				Description: "Apply AI review findings and open or CONTINUE a GitHub fix PR as PipeOps[bot] " +
 					"(targets the PR source branch). IDEMPOTENT: if a job is already running, returns that job; " +
-					"if all findings were already applied, returns the existing completed job + pr_url " +
-					"(already_exists=true) without opening a second PR. " +
-					"By default WAITS for a newly started job (~3m) and returns pr_url. " +
-					"If a prior bot PR only fixed some findings, call with finding_indexes set to " +
-					"fix_status.remaining_finding_indexes from get_ai_review. " +
-					"Do not start another fix PR when already_exists is true.",
+					"if all findings were already applied on a clean tip, returns existing pr_url (already_exists=true). " +
+					"If a prior bot branch tip is heavily poisoned, the controller starts a FRESH branch instead of stacking. " +
+					"By default WAITS (~5m) and returns pr_url; while waiting, poll data includes progress steps " +
+					"(resolve/branch/patch/pr). Prefer get_ai_review fix_status first.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"project_id":  stringProperty("Project ID, UUID, name, or slug"),
 					"review_uuid": stringProperty("AI review UUID to fix"),
@@ -1990,7 +1985,7 @@ func (s *Server) toolDefinitions() []toolDefinition {
 							"To continue a partial PR, pass only the unfixed indexes e.g. [5,6,10,11,12,13,14,15,16].",
 					),
 					"mode":         stringProperty("Optional mode (default branch_pr)"),
-					"wait":         booleanProperty("Wait for job completion (default true). Set false to return immediately with job uuid. Ignored when already_exists (returns immediately)."),
+					"wait":         booleanProperty("Wait for job completion (default true). Set false to return immediately with job uuid."),
 					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
 				}, "project_id", "review_uuid"),
 			},
@@ -1999,9 +1994,10 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		{
 			tool: Tool{
 				Name: "get_ai_review_fix_job",
-				Description: "Get status of an AI review fix-PR job started by create_ai_review_fix_pr. " +
-					"Statuses: queued, running, completed, failed. On completed, data.pr_url is the fix PR. " +
-					"Use when get_ai_review.fix_status.has_active_job is true.",
+				Description: "Get status of an AI review fix-PR job. Statuses: queued, running, completed, failed. " +
+					"While running: data.progress is a harness step list (resolve/branch/patch/pr), " +
+					"data.strategy is fresh|continue|heal|refuse_poisoned_fresh, data.progress_hint is the live label. " +
+					"On completed: data.pr_url and data.files.",
 				InputSchema: objectSchema(map[string]interface{}{
 					"job_uuid":     stringProperty("Fix job UUID from create_ai_review_fix_pr or fix_status.latest_job.uuid"),
 					"workspace_id": stringProperty("Optional workspace ID or UUID override"),
@@ -8643,7 +8639,6 @@ func (s *Server) createAIReviewFixPRTool(ctx context.Context, args map[string]in
 			"pr_url":         extractAIReviewFixJobPRURL(resp),
 		})
 	}
-	// Also treat completed jobs in the create response as done (no wait).
 	if st := strings.ToLower(strings.TrimSpace(extractAIReviewFixJobStatus(resp))); st == "completed" {
 		return jsonResult(map[string]interface{}{
 			"success":     true,
@@ -8655,6 +8650,7 @@ func (s *Server) createAIReviewFixPRTool(ctx context.Context, args map[string]in
 	}
 
 	// Default: wait so agents don't stop after "queued" without a pr_url.
+	// Poll returns harness progress_hint while running.
 	wait := true
 	if req.Wait != nil {
 		wait = *req.Wait
@@ -8768,6 +8764,12 @@ func (s *Server) pollAIReviewFixJob(ctx context.Context, jobUUID, workspaceUUID 
 		}
 		last = resp
 		status := strings.ToLower(strings.TrimSpace(extractAIReviewFixJobStatus(resp)))
+		// Attach a human-readable progress hint for agents (latest running step).
+		if data, ok := resp["data"].(map[string]interface{}); ok {
+			if hint := latestFixJobProgressHint(data); hint != "" {
+				data["progress_hint"] = hint
+			}
+		}
 		switch status {
 		case "completed", "failed":
 			return resp, nil
@@ -8796,6 +8798,47 @@ func extractAIReviewFixJobStatus(resp map[string]interface{}) string {
 		}
 	}
 	return extractString(lookupValue(resp, "status", "Status"))
+}
+
+// latestFixJobProgressHint picks the newest running step label, else last step.
+func latestFixJobProgressHint(data map[string]interface{}) string {
+	if data == nil {
+		return ""
+	}
+	raw, ok := data["progress"]
+	if !ok {
+		return ""
+	}
+	arr, ok := raw.([]interface{})
+	if !ok || len(arr) == 0 {
+		return ""
+	}
+	var lastLabel string
+	for i := len(arr) - 1; i >= 0; i-- {
+		step, ok := arr[i].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		label := strings.TrimSpace(extractString(lookupValue(step, "label", "Label")))
+		status := strings.ToLower(strings.TrimSpace(extractString(lookupValue(step, "status", "Status"))))
+		detail := strings.TrimSpace(extractString(lookupValue(step, "detail", "Detail")))
+		if label == "" {
+			continue
+		}
+		if lastLabel == "" {
+			lastLabel = label
+			if detail != "" {
+				lastLabel = label + " — " + detail
+			}
+		}
+		if status == "running" {
+			if detail != "" {
+				return label + " — " + detail
+			}
+			return label
+		}
+	}
+	return lastLabel
 }
 
 func (s *Server) getAIReviewFixJobTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
