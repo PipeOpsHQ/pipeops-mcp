@@ -121,6 +121,7 @@ func TestHandleToolsList(t *testing.T) {
 		"get_addon_deployment",
 		"get_addon_deployment_session",
 		"view_addon_deployment_configs",
+		"restart_addon_deployment",
 		"add_addon_domain",
 		"list_addon_categories",
 		"get_my_addon_submissions",

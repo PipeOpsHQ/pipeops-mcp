@@ -1142,6 +1142,18 @@ func (s *Server) toolDefinitions() []toolDefinition {
 		},
 		{
 			tool: Tool{
+				Name: "restart_addon_deployment",
+				Description: "Restart a deployed add-on by rolling its pods. Does not rebuild or change configuration. " +
+					"Requires write access. Fails if the add-on is currently deploying.",
+				InputSchema: objectSchema(map[string]interface{}{
+					"deployment_id": stringProperty("The add-on deployment ID or UUID"),
+					"workspace_id":  stringProperty("Workspace ID or UUID (required for multi-workspace accounts)"),
+				}, "deployment_id"),
+			},
+			handler: s.restartAddOnDeploymentTool,
+		},
+		{
+			tool: Tool{
 				Name: "add_addon_domain",
 				Description: "Add a custom domain to an add-on deployment. The controller requires " +
 					"network_uuid or network_port so the domain attaches to a specific network target " +
@@ -7060,6 +7072,26 @@ func (s *Server) viewAddOnDeploymentConfigsTool(ctx context.Context, args map[st
 		return nil, fmt.Errorf("resolve workspace: %w (API requires workspace query for configs)", err)
 	}
 	resp, _, err := s.client.AddOns.ViewDeploymentConfigs(ctx, req.DeploymentID, &pipeops.ViewDeploymentConfigsOptions{WorkspaceUUID: workspaceUUID})
+	if err != nil {
+		return nil, err
+	}
+	return jsonResult(resp)
+}
+
+func (s *Server) restartAddOnDeploymentTool(ctx context.Context, args map[string]interface{}) (interface{}, error) {
+	deploymentID, err := requiredString(args, "deployment_id")
+	if err != nil {
+		return nil, err
+	}
+	workspaceUUID, err := s.resolveDefaultWorkspaceUUID(ctx, args)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace: %w", err)
+	}
+	path := withQueryValues(
+		fmt.Sprintf("addons/deployments/%s/restart", url.PathEscape(deploymentID)),
+		map[string]string{"workspace": workspaceUUID},
+	)
+	resp, err := s.requestJSON(ctx, http.MethodPost, path, nil)
 	if err != nil {
 		return nil, err
 	}
