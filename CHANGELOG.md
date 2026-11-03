@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Security
+- Upgrade `github.com/klauspost/compress` from v1.17.11 to v1.18.7. v1.17.11 has a signed integer overflow in `s2.NewDict` that can crash the process. The module is pulled in by `github.com/posthog/posthog-go`.
 - Reject OAuth dynamic client registration and authorization for redirect URIs that are not loopback or a known MCP callback. Previously any `https` redirect was accepted, so an unauthenticated caller could register a client and receive a PipeOps user's authorization code after that user signed in.
 - Require an explicit consent step that shows the client name and redirect host before sending the user to the PipeOps Console.
 - Refuse access and refresh tokens when the registered client's redirect URIs no longer pass that policy.
