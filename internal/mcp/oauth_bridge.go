@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -36,16 +38,18 @@ var (
 )
 
 type oauthBridgeConfig struct {
-	Issuer          string
-	ResourceURL     string
-	BaseURL         string
-	ConsoleURL      string
-	ConsoleClientID string
-	ConsoleScopes   []string
-	Scopes          []string
-	Store           oauthStore
-	Cipher          *credentialCipher
-	Now             func() time.Time
+	Issuer             string
+	ResourceURL        string
+	BaseURL            string
+	ConsoleURL         string
+	ConsoleClientID    string
+	ConsoleScopes      []string
+	Scopes             []string
+	Store              oauthStore
+	Cipher             *credentialCipher
+	Now                func() time.Time
+	RedirectAllowHosts []string
+	RedirectAllowURIs  []string
 }
 
 type oauthBridge struct {
@@ -61,6 +65,7 @@ type oauthBridge struct {
 	cipher        *credentialCipher
 	now           func() time.Time
 	limiter       *oauthRateLimiter
+	redirectRules []oauthRedirectRule
 }
 
 type oauthClientRecord struct {
@@ -86,6 +91,7 @@ type oauthAuthorizationRequest struct {
 	CodeChallenge            string   `json:"code_challenge"`
 	ConsoleState             string   `json:"console_state"`
 	EncryptedConsoleVerifier string   `json:"encrypted_console_verifier"`
+	Consented                bool     `json:"consented,omitempty"`
 }
 
 type oauthAuthorizationCode struct {
@@ -178,6 +184,10 @@ func newOAuthBridge(config oauthBridgeConfig) (*oauthBridge, error) {
 	for _, scope := range scopes {
 		scopeSet[scope] = struct{}{}
 	}
+	redirectRules, err := compileOAuthRedirectRules(config.RedirectAllowHosts, config.RedirectAllowURIs)
+	if err != nil {
+		return nil, err
+	}
 	return &oauthBridge{
 		issuer:        strings.TrimRight(config.Issuer, "/"),
 		resourceURL:   config.ResourceURL,
@@ -190,6 +200,7 @@ func newOAuthBridge(config oauthBridgeConfig) (*oauthBridge, error) {
 		store:         config.Store,
 		cipher:        config.Cipher,
 		now:           config.Now,
+		redirectRules: redirectRules,
 		limiter: &oauthRateLimiter{
 			windows: make(map[string]oauthRateWindow),
 			now:     config.Now,
@@ -247,7 +258,11 @@ func (b *oauthBridge) handleRegistration(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if !b.allow(r, "register", 20, time.Minute) {
-		b.writeRegistrationError(w, "invalid_client_metadata", "registration rate limit exceeded")
+		w.Header().Set("Retry-After", "60")
+		b.writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error":             "invalid_client_metadata",
+			"error_description": "registration rate limit exceeded",
+		})
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
@@ -263,6 +278,7 @@ func (b *oauthBridge) handleRegistration(w http.ResponseWriter, r *http.Request)
 	}
 	client, secret, err := b.validateAndCreateClient(&metadata)
 	if err != nil {
+		log.Printf("oauth: rejected client registration: %s", err)
 		b.writeRegistrationError(w, "invalid_client_metadata", err.Error())
 		return
 	}
@@ -270,6 +286,7 @@ func (b *oauthBridge) handleRegistration(w http.ResponseWriter, r *http.Request)
 		b.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server_error", "error_description": "client registration unavailable"})
 		return
 	}
+	log.Printf("oauth: registered client_id=%s name=%q redirect_hosts=%s", client.ClientID, client.ClientName, strings.Join(redirectHosts(client.RedirectURIs), ","))
 	response := &oauthex.ClientRegistrationResponse{
 		ClientRegistrationMetadata: oauthex.ClientRegistrationMetadata{
 			RedirectURIs:            client.RedirectURIs,
@@ -298,7 +315,7 @@ func (b *oauthBridge) validateAndCreateClient(metadata *oauthex.ClientRegistrati
 		if len(redirect) > 2048 {
 			return nil, "", errors.New("redirect_uri is too long")
 		}
-		if err := validateOAuthRedirectURI(redirect); err != nil {
+		if err := b.validateClientRedirectURI(redirect); err != nil {
 			return nil, "", err
 		}
 		if _, ok := seen[redirect]; !ok {
@@ -332,7 +349,7 @@ func (b *oauthBridge) validateAndCreateClient(metadata *oauthex.ClientRegistrati
 		return nil, "", errors.New("only the code response_type is supported")
 	}
 	clientName := strings.TrimSpace(metadata.ClientName)
-	if len(clientName) > 128 || strings.IndexFunc(clientName, func(r rune) bool { return r < 0x20 || r == 0x7f }) >= 0 {
+	if !validOAuthClientName(clientName) {
 		return nil, "", errors.New("client_name is invalid")
 	}
 	registeredScopes, err := b.validateScopes(strings.Fields(metadata.Scope), true)
@@ -371,8 +388,10 @@ func (b *oauthBridge) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		b.beginAuthorization(w, r)
+	case http.MethodPost:
+		b.approveAuthorization(w, r)
 	default:
-		w.Header().Set("Allow", http.MethodGet)
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
@@ -393,7 +412,7 @@ func (b *oauthBridge) beginAuthorization(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	redirectURI := query.Get("redirect_uri")
-	if !containsString(client.RedirectURIs, redirectURI) {
+	if !containsString(client.RedirectURIs, redirectURI) || b.validateClientRedirectURI(redirectURI) != nil {
 		http.Error(w, "invalid redirect_uri", http.StatusBadRequest)
 		return
 	}
@@ -429,6 +448,74 @@ func (b *oauthBridge) beginAuthorization(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	consentNonce, err := randomOAuthValue("pocn_", 24)
+	if err != nil {
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	authorization := oauthAuthorizationRequest{
+		ID:            requestID,
+		ClientID:      client.ClientID,
+		ClientName:    client.ClientName,
+		RedirectURI:   redirectURI,
+		State:         query.Get("state"),
+		Scopes:        scopes,
+		Resource:      resource,
+		CodeChallenge: challenge,
+	}
+	if err := putOAuthJSON(r.Context(), b.store, oauthLookupKey("request", requestID), &authorization, oauthAuthorizationRequestTTL); err != nil {
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if err := b.store.Put(r.Context(), oauthLookupKey("consent", consentNonce), []byte(requestID), oauthAuthorizationRequestTTL); err != nil {
+		_ = b.store.Delete(r.Context(), oauthLookupKey("request", requestID))
+		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	b.renderAuthorizationConsent(w, authorization, consentNonce)
+}
+
+func (b *oauthBridge) approveAuthorization(w http.ResponseWriter, r *http.Request) {
+	if !b.allow(r, "authorize", 30, time.Minute) {
+		http.Error(w, "authorization rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "invalid authorization request", http.StatusBadRequest)
+		return
+	}
+	requestID := r.PostForm.Get("request_id")
+	nonce := r.PostForm.Get("consent")
+	decision := r.PostForm.Get("decision")
+	if requestID == "" || nonce == "" || (decision != "approve" && decision != "deny") {
+		http.Error(w, "invalid authorization request", http.StatusBadRequest)
+		return
+	}
+	storedID, err := b.store.Consume(r.Context(), oauthLookupKey("consent", nonce))
+	if err != nil {
+		http.Error(w, "authorization request expired or invalid", http.StatusBadRequest)
+		return
+	}
+	if subtle.ConstantTimeCompare(storedID, []byte(requestID)) != 1 {
+		http.Error(w, "authorization request expired or invalid", http.StatusBadRequest)
+		return
+	}
+	var authorization oauthAuthorizationRequest
+	if err := getOAuthJSON(r.Context(), b.store, oauthLookupKey("request", requestID), &authorization); err != nil {
+		http.Error(w, "authorization request expired or invalid", http.StatusBadRequest)
+		return
+	}
+	if authorization.Consented || authorization.ID != requestID || b.validateClientRedirectURI(authorization.RedirectURI) != nil {
+		_ = b.store.Delete(r.Context(), oauthLookupKey("request", requestID))
+		http.Error(w, "authorization request expired or invalid", http.StatusBadRequest)
+		return
+	}
+	if decision == "deny" {
+		_ = b.store.Delete(r.Context(), oauthLookupKey("request", requestID))
+		b.redirectAuthorizationError(w, r, authorization.RedirectURI, authorization.State, "access_denied", "access was denied")
+		return
+	}
 	consoleState, err := randomOAuthValue("pocs_", 24)
 	if err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
@@ -444,18 +531,9 @@ func (b *oauthBridge) beginAuthorization(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	authorization := oauthAuthorizationRequest{
-		ID:                       requestID,
-		ClientID:                 client.ClientID,
-		ClientName:               client.ClientName,
-		RedirectURI:              redirectURI,
-		State:                    query.Get("state"),
-		Scopes:                   scopes,
-		Resource:                 resource,
-		CodeChallenge:            challenge,
-		ConsoleState:             consoleState,
-		EncryptedConsoleVerifier: encryptedVerifier,
-	}
+	authorization.Consented = true
+	authorization.ConsoleState = consoleState
+	authorization.EncryptedConsoleVerifier = encryptedVerifier
 	if err := putOAuthJSON(r.Context(), b.store, oauthLookupKey("request", requestID), &authorization, oauthAuthorizationRequestTTL); err != nil {
 		http.Error(w, "authorization unavailable", http.StatusServiceUnavailable)
 		return
@@ -466,6 +544,25 @@ func (b *oauthBridge) beginAuthorization(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	http.Redirect(w, r, b.consoleAuthorizationURL(consoleState, consoleVerifier), http.StatusFound)
+}
+
+func (b *oauthBridge) renderAuthorizationConsent(w http.ResponseWriter, authorization oauthAuthorizationRequest, nonce string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	w.WriteHeader(http.StatusOK)
+	err := oauthConsentTemplate.Execute(w, oauthConsentView{
+		ClientName:   authorization.ClientName,
+		RedirectHost: redirectDisplayHost(authorization.RedirectURI),
+		ScopeLines:   consentScopeLines(authorization.Scopes),
+		RequestID:    authorization.ID,
+		Nonce:        nonce,
+	})
+	if err != nil {
+		log.Printf("oauth: render consent page: %v", err)
+	}
 }
 
 func (b *oauthBridge) handleConsoleCallback(w http.ResponseWriter, r *http.Request) {
@@ -494,6 +591,11 @@ func (b *oauthBridge) handleConsoleCallback(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if authorization.ConsoleState == "" || subtle.ConstantTimeCompare([]byte(state), []byte(authorization.ConsoleState)) != 1 {
+		b.renderConsoleCallbackError(w, http.StatusBadRequest, "Authorization request expired", "Start the PipeOps connection again from your AI client.")
+		return
+	}
+	if !authorization.Consented || b.validateClientRedirectURI(authorization.RedirectURI) != nil {
+		_, _ = b.store.Consume(r.Context(), oauthLookupKey("request", authorization.ID))
 		b.renderConsoleCallbackError(w, http.StatusBadRequest, "Authorization request expired", "Start the PipeOps connection again from your AI client.")
 		return
 	}
@@ -749,6 +851,14 @@ func (b *oauthBridge) exchangeAuthorizationCode(w http.ResponseWriter, r *http.R
 		b.writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code does not match this client")
 		return
 	}
+	if err := b.clientRedirectsPermitted(r.Context(), client.ClientID); err != nil {
+		if errors.Is(err, errOAuthInvalidClient) || errors.Is(err, errOAuthRecordNotFound) {
+			b.writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization client is no longer allowed")
+		} else {
+			b.writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "token service unavailable")
+		}
+		return
+	}
 	if resource := r.PostForm.Get("resource"); resource != "" && resource != record.Resource {
 		b.writeTokenError(w, http.StatusBadRequest, "invalid_target", "authorization code does not match this resource")
 		return
@@ -792,6 +902,14 @@ func (b *oauthBridge) exchangeRefreshToken(w http.ResponseWriter, r *http.Reques
 	}
 	if record.ClientID != client.ClientID {
 		b.writeTokenError(w, http.StatusBadRequest, "invalid_grant", "refresh token does not match this client")
+		return
+	}
+	if err := b.clientRedirectsPermitted(r.Context(), client.ClientID); err != nil {
+		if errors.Is(err, errOAuthInvalidClient) || errors.Is(err, errOAuthRecordNotFound) {
+			b.writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization client is no longer allowed")
+		} else {
+			b.writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "token service unavailable")
+		}
 		return
 	}
 	if resource := r.PostForm.Get("resource"); resource != "" && resource != record.Resource {
@@ -1062,6 +1180,12 @@ func (b *oauthBridge) resolveAccessToken(ctx context.Context, token string) (*ve
 		}
 		return nil, err
 	}
+	if err := b.clientRedirectsPermitted(ctx, record.ClientID); err != nil {
+		if errors.Is(err, errOAuthInvalidClient) || errors.Is(err, errOAuthRecordNotFound) {
+			return nil, errOAuthRecordNotFound
+		}
+		return nil, err
+	}
 	credential, err := b.openGrantCredential(ctx, record)
 	if err != nil {
 		return nil, errOAuthRecordNotFound
@@ -1278,6 +1402,36 @@ func validPKCEVerifier(verifier, challenge string) bool {
 	return subtle.ConstantTimeCompare([]byte(actual), []byte(challenge)) == 1
 }
 
+func (b *oauthBridge) clientRedirectsPermitted(ctx context.Context, clientID string) error {
+	client, err := b.loadClient(ctx, clientID)
+	if err != nil {
+		return err
+	}
+	if len(client.RedirectURIs) == 0 {
+		return errOAuthInvalidClient
+	}
+	for _, redirect := range client.RedirectURIs {
+		if err := b.validateClientRedirectURI(redirect); err != nil {
+			return errOAuthInvalidClient
+		}
+	}
+	return nil
+}
+
+func (b *oauthBridge) validateClientRedirectURI(value string) error {
+	if err := validateOAuthRedirectURI(value); err != nil {
+		return err
+	}
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return errors.New("redirect_uri must be an absolute URL")
+	}
+	if !b.redirectURIPermitted(parsed) {
+		return errors.New("redirect_uri host is not allowed")
+	}
+	return nil
+}
+
 func validateOAuthRedirectURI(value string) error {
 	parsed, err := url.Parse(value)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
@@ -1339,3 +1493,225 @@ func containsString(values []string, candidate string) bool {
 	return false
 }
 
+// oauthRedirectRule is an exact-host allow rule. An empty path matches any safe
+// path on that host. A path ending in "/" is a prefix. Any other path is exact.
+// Dynamic registration stays available for MCP clients, but only these HTTPS
+// callbacks and loopback redirects can receive authorization codes.
+type oauthRedirectRule struct {
+	host       string
+	pathPrefix string
+}
+
+func defaultOAuthRedirectRules() []oauthRedirectRule {
+	return []oauthRedirectRule{
+		{host: "claude.ai", pathPrefix: "/api/mcp/auth_callback"},
+		{host: "claude.com", pathPrefix: "/api/mcp/auth_callback"},
+		{host: "chatgpt.com", pathPrefix: "/connector_platform_oauth_redirect"},
+		{host: "chatgpt.com", pathPrefix: "/connector/oauth/"},
+		{host: "platform.openai.com", pathPrefix: "/apps-manage/oauth"},
+		{host: "cursor.com", pathPrefix: "/agents/mcp/oauth/callback"},
+		{host: "www.cursor.com", pathPrefix: "/agents/mcp/oauth/callback"},
+		{host: "vscode.dev", pathPrefix: "/redirect"},
+		{host: "insiders.vscode.dev", pathPrefix: "/redirect"},
+	}
+}
+
+func compileOAuthRedirectRules(extraHosts, extraURIs []string) ([]oauthRedirectRule, error) {
+	rules := defaultOAuthRedirectRules()
+	for _, host := range extraHosts {
+		host = strings.ToLower(strings.TrimSpace(host))
+		if host == "" {
+			continue
+		}
+		if strings.Contains(host, "://") || strings.Contains(host, "/") || strings.Contains(host, ":") {
+			return nil, fmt.Errorf("OAuth redirect allow host %q must be a bare hostname", host)
+		}
+		canonical, err := canonicalRedirectHost(host)
+		if err != nil || isLoopbackHostname(canonical) || net.ParseIP(canonical) != nil {
+			return nil, fmt.Errorf("OAuth redirect allow host %q is invalid", host)
+		}
+		rules = append(rules, oauthRedirectRule{host: canonical})
+	}
+	for _, raw := range extraURIs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" || parsed.RawQuery != "" {
+			return nil, fmt.Errorf("OAuth redirect allow URI %q must be an https URL without a query or fragment", raw)
+		}
+		host, err := canonicalRedirectHost(parsed.Hostname())
+		if err != nil || isLoopbackHostname(host) || net.ParseIP(host) != nil {
+			return nil, fmt.Errorf("OAuth redirect allow URI %q is invalid", raw)
+		}
+		path, ok := safeRedirectPath(parsed.Path)
+		if !ok {
+			return nil, fmt.Errorf("OAuth redirect allow URI %q has an invalid path", raw)
+		}
+		rules = append(rules, oauthRedirectRule{host: host, pathPrefix: path})
+	}
+	return rules, nil
+}
+
+func (b *oauthBridge) redirectURIPermitted(parsed *url.URL) bool {
+	host, err := canonicalRedirectHost(parsed.Hostname())
+	if err != nil {
+		return false
+	}
+	path, ok := safeRedirectPath(parsed.Path)
+	if !ok {
+		return false
+	}
+	if isLoopbackHostname(host) {
+		return parsed.Scheme == "http" || parsed.Scheme == "https"
+	}
+	if parsed.Scheme != "https" || net.ParseIP(host) != nil {
+		return false
+	}
+	for _, rule := range b.redirectRules {
+		if host != rule.host {
+			continue
+		}
+		if rule.pathPrefix == "" || redirectPathMatches(path, rule.pathPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalRedirectHost(hostname string) (string, error) {
+	host := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(hostname)), ".")
+	if host == "" || strings.Contains(host, "..") {
+		return "", errors.New("redirect_uri host is invalid")
+	}
+	if isLoopbackHostname(host) {
+		return host, nil
+	}
+	if net.ParseIP(host) != nil {
+		return "", errors.New("redirect_uri must not use an IP address")
+	}
+	for _, r := range host {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '-':
+		default:
+			return "", errors.New("redirect_uri host is invalid")
+		}
+	}
+	if strings.HasPrefix(host, ".") || strings.HasPrefix(host, "-") || strings.HasSuffix(host, "-") {
+		return "", errors.New("redirect_uri host is invalid")
+	}
+	return host, nil
+}
+
+func safeRedirectPath(path string) (string, bool) {
+	if path == "" {
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") || strings.Contains(path, "\\") || strings.Contains(path, "..") || strings.Contains(path, "//") {
+		return "", false
+	}
+	return path, true
+}
+
+func redirectPathMatches(path, rule string) bool {
+	if strings.HasSuffix(rule, "/") {
+		return strings.HasPrefix(path, rule)
+	}
+	return path == rule
+}
+
+func validOAuthClientName(name string) bool {
+	if len(name) > 128 {
+		return false
+	}
+	for _, r := range name {
+		if r < 0x20 || r > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func redirectHosts(uris []string) []string {
+	hosts := make([]string, 0, len(uris))
+	for _, uri := range uris {
+		parsed, err := url.Parse(uri)
+		if err != nil || parsed.Hostname() == "" {
+			continue
+		}
+		hosts = append(hosts, parsed.Hostname())
+	}
+	return hosts
+}
+
+func redirectDisplayHost(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() == "" {
+		return "an unknown host"
+	}
+	return parsed.Hostname()
+}
+
+func consentScopeLines(scopes []string) []string {
+	lines := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		switch scope {
+		case "api:read":
+			lines = append(lines, "Read projects, deployments, and account data (api:read)")
+		case "api:write":
+			lines = append(lines, "Create, change, and delete projects and deployments (api:write)")
+		default:
+			lines = append(lines, scope)
+		}
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "Read projects, deployments, and account data (api:read)")
+	}
+	return lines
+}
+
+type oauthConsentView struct {
+	ClientName   string
+	RedirectHost string
+	ScopeLines   []string
+	RequestID    string
+	Nonce        string
+}
+
+var oauthConsentTemplate = template.Must(template.New("consent").Parse(`<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Authorize PipeOps access</title>
+<style>
+body { margin: 0; font-family: Georgia, "Iowan Old Style", serif; background: #f4f1ea; color: #1c1915; }
+main { max-width: 36rem; margin: 8vh auto; padding: 2rem; background: #fffdf8; border: 1px solid #d9d1c3; }
+h1 { font-size: 1.6rem; line-height: 1.2; margin: 0 0 1rem; }
+p, li { line-height: 1.45; }
+.host { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.95rem; }
+form { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 1.5rem; }
+button { font: inherit; padding: 0.7rem 1rem; border: 1px solid #1c1915; cursor: pointer; }
+button[value="approve"] { background: #1c1915; color: #fffdf8; }
+button[value="deny"] { background: transparent; color: #1c1915; }
+</style>
+</head>
+<body>
+<main>
+<h1>Authorize access to PipeOps</h1>
+<p><strong>{{.ClientName}}</strong> is asking to use your PipeOps account.</p>
+<p>After you sign in, PipeOps sends an authorization code to <strong class="host">{{.RedirectHost}}</strong>. Continue only if you trust that application.</p>
+<h2>Requested access</h2>
+<ul>
+{{range .ScopeLines}}<li>{{.}}</li>{{end}}
+</ul>
+<form method="post" action="/oauth/authorize" autocomplete="off">
+<input type="hidden" name="request_id" value="{{.RequestID}}">
+<input type="hidden" name="consent" value="{{.Nonce}}">
+<button type="submit" name="decision" value="approve">Continue to PipeOps sign-in</button>
+<button type="submit" name="decision" value="deny">Cancel</button>
+</form>
+</main>
+</body>
+</html>`))

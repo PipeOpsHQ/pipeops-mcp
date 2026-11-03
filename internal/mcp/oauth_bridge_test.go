@@ -89,19 +89,8 @@ func testOAuthBridgeAuthorizationCodeRefreshAndScopeFlow(t *testing.T, store oau
 		"code_challenge_method": {"S256"},
 	}.Encode()
 
-	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
-	response, err := noRedirect.Get(authorizeURL)
-	if err != nil {
-		t.Fatalf("begin authorization: %v", err)
-	}
-	page, _ := io.ReadAll(response.Body)
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusFound {
-		t.Fatalf("authorize status = %d; body = %s", response.StatusCode, page)
-	}
-	code := completeConsoleAuthorization(t, server.URL, response.Header.Get("Location"), "console-code")
+	location := approveOAuthConsent(t, server.URL, authorizeURL)
+	code := completeConsoleAuthorization(t, server.URL, location, "console-code")
 
 	wrongResource := postOAuthForm(t, server.URL+"/oauth/token", url.Values{
 		"grant_type":    {"authorization_code"},
@@ -213,6 +202,17 @@ func TestOAuthBridgeRejectsUnsafeAndMismatchedRedirects(t *testing.T) {
 		t.Fatalf("unsafe redirect registration = %#v", unsafe)
 	}
 
+	phishing := postJSON(t, server.URL+"/oauth/register", `{
+		"redirect_uris":["https://webhook.site/39354f08-2d8d-4101-ab74-45b4f7ac7490"],
+		"client_name":"Malicious Client",
+		"grant_types":["authorization_code","refresh_token"],
+		"response_types":["code"],
+		"scope":"api:read api:write"
+	}`)
+	if phishing.StatusCode != http.StatusBadRequest || strings.Contains(phishing.Body, "client_id") || !strings.Contains(phishing.Body, "not allowed") {
+		t.Fatalf("open https redirect registration = %#v", phishing)
+	}
+
 	clientID := registerOAuthClient(t, server.URL, "http://127.0.0.1:8765/callback")
 	response, err := http.Get(server.URL + "/oauth/authorize?" + url.Values{
 		"client_id":             {clientID},
@@ -235,7 +235,7 @@ func TestOAuthBridgeEnforcesRegisteredClientAuthenticationMethod(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	clientID, clientSecret := registerOAuthClientWithMethod(t, server.URL, "https://client.example/callback", "client_secret_basic")
+	clientID, clientSecret := registerOAuthClientWithMethod(t, server.URL, "http://127.0.0.1:8765/callback", "client_secret_basic")
 	bodyCredentials := postOAuthForm(t, server.URL+"/oauth/token", url.Values{
 		"grant_type":    {"unsupported"},
 		"client_id":     {clientID},
@@ -269,7 +269,7 @@ func TestOAuthBridgeRegistrationRejectsTrailingJSON(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	response := postJSON(t, server.URL+"/oauth/register", `{"redirect_uris":["https://client.example/callback"]}{}`)
+	response := postJSON(t, server.URL+"/oauth/register", `{"redirect_uris":["http://127.0.0.1:8765/callback"]}{}`)
 	if response.StatusCode != http.StatusBadRequest || !strings.Contains(response.Body, "invalid_client_metadata") {
 		t.Fatalf("trailing registration JSON = %#v", response)
 	}
@@ -281,7 +281,7 @@ func TestOAuthBridgeRegistrationIgnoresUnknownMetadata(t *testing.T) {
 	defer server.Close()
 
 	response := postJSON(t, server.URL+"/oauth/register", `{
-		"redirect_uris":["https://client.example/callback"],
+		"redirect_uris":["https://claude.ai/api/mcp/auth_callback"],
 		"token_endpoint_auth_method":"none",
 		"future_extension":"ignored"
 	}`)
@@ -335,7 +335,7 @@ func TestOAuthBridgeAllowsSupportedAuthorizationScopesBeyondRegistrationDefaults
 	verifier := strings.Repeat("c", 64)
 	digest := sha256.Sum256([]byte(verifier))
 	challenge := base64.RawURLEncoding.EncodeToString(digest[:])
-	response, err := noRedirect.Get(server.URL + "/oauth/authorize?" + url.Values{
+	authorizeURL := server.URL + "/oauth/authorize?" + url.Values{
 		"client_id":             {registered.ClientID},
 		"redirect_uri":          {"https://claude.ai/api/mcp/auth_callback"},
 		"response_type":         {"code"},
@@ -344,15 +344,9 @@ func TestOAuthBridgeAllowsSupportedAuthorizationScopesBeyondRegistrationDefaults
 		"state":                 {"claude-state"},
 		"code_challenge":        {challenge},
 		"code_challenge_method": {"S256"},
-	}.Encode())
-	if err != nil {
-		t.Fatalf("begin Claude authorization: %v", err)
-	}
-	_ = response.Body.Close()
-	if response.StatusCode != http.StatusFound {
-		t.Fatalf("Claude authorization status = %d; location = %s", response.StatusCode, response.Header.Get("Location"))
-	}
-	code := completeConsoleAuthorization(t, server.URL, response.Header.Get("Location"), "claude-console-code")
+	}.Encode()
+	location := approveOAuthConsent(t, server.URL, authorizeURL)
+	code := completeConsoleAuthorization(t, server.URL, location, "claude-console-code")
 
 	exchanged := postOAuthForm(t, server.URL+"/oauth/token", url.Values{
 		"grant_type":    {"authorization_code"},
@@ -507,7 +501,15 @@ func TestOAuthBridgeRefreshesExpiredConsoleCredential(t *testing.T) {
 	if err := bridge.storeConsoleCredential(context.Background(), credentialID, "user-1", credential); err != nil {
 		t.Fatalf("store Console credential: %v", err)
 	}
-	grant := oauthGrantRecord{ClientID: "client", Scopes: []string{"api:read"}, Resource: "https://mcp.pipeops.test/mcp", CredentialID: credentialID, UserID: "user-1"}
+	if err := putOAuthJSON(context.Background(), store, "client:pomcp_testclient", &oauthClientRecord{
+		ClientID:                "pomcp_testclient",
+		RedirectURIs:            []string{"http://127.0.0.1:8765/callback"},
+		TokenEndpointAuthMethod: "none",
+		ClientName:              "Test AI client",
+	}, time.Hour); err != nil {
+		t.Fatalf("store client: %v", err)
+	}
+	grant := oauthGrantRecord{ClientID: "pomcp_testclient", Scopes: []string{"api:read"}, Resource: "https://mcp.pipeops.test/mcp", CredentialID: credentialID, UserID: "user-1"}
 	if err := putOAuthJSON(context.Background(), store, oauthLookupKey("access", "poat_test"), &grant, oauthAccessTokenTTL); err != nil {
 		t.Fatalf("store grant: %v", err)
 	}
@@ -542,7 +544,7 @@ func TestOAuthRevocationFailsClosedWhenStoreIsUnavailable(t *testing.T) {
 	}
 	server := httptest.NewServer(handler)
 	defer server.Close()
-	clientID := registerOAuthClient(t, server.URL, "https://client.example/callback")
+	clientID := registerOAuthClient(t, server.URL, "http://127.0.0.1:8765/callback")
 
 	response := postOAuthForm(t, server.URL+"/oauth/revoke", url.Values{
 		"client_id": {clientID},
@@ -708,6 +710,305 @@ func completeConsoleAuthorization(t *testing.T, serverURL, consoleLocation, cons
 		t.Fatalf("MCP client callback has no code: %s", redirect)
 	}
 	return code
+}
+
+func approveOAuthConsent(t *testing.T, serverURL, authorizeURL string) string {
+	t.Helper()
+	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	response, err := noRedirect.Get(authorizeURL)
+	if err != nil {
+		t.Fatalf("begin authorization: %v", err)
+	}
+	page, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("consent status = %d; body = %s", response.StatusCode, page)
+	}
+	if response.Header.Get("Location") != "" {
+		t.Fatal("authorization redirected before consent")
+	}
+	if !strings.Contains(response.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+		t.Fatalf("consent CSP = %q", response.Header.Get("Content-Security-Policy"))
+	}
+	approved, err := noRedirect.PostForm(serverURL+"/oauth/authorize", url.Values{
+		"request_id": {hiddenInput(t, string(page), "request_id")},
+		"consent":    {hiddenInput(t, string(page), "consent")},
+		"decision":   {"approve"},
+	})
+	if err != nil {
+		t.Fatalf("approve authorization: %v", err)
+	}
+	defer func() { _ = approved.Body.Close() }()
+	if approved.StatusCode != http.StatusFound {
+		body, _ := io.ReadAll(approved.Body)
+		t.Fatalf("approved authorization status = %d; body = %s", approved.StatusCode, body)
+	}
+	if !strings.Contains(approved.Header.Get("Location"), "/auth/signin") {
+		t.Fatalf("approved authorization location = %s", approved.Header.Get("Location"))
+	}
+	return approved.Header.Get("Location")
+}
+
+func hiddenInput(t *testing.T, body, name string) string {
+	t.Helper()
+	needle := `name="` + name + `" value="`
+	start := strings.Index(body, needle)
+	if start < 0 {
+		t.Fatalf("consent page missing %s", name)
+	}
+	rest := body[start+len(needle):]
+	end := strings.Index(rest, `"`)
+	if end <= 0 {
+		t.Fatalf("consent page has empty %s", name)
+	}
+	return rest[:end]
+}
+
+func TestOAuthRedirectPolicyBlocksUntrustedHTTPSAndAllowsKnownMCPClients(t *testing.T) {
+	bridge := newPolicyTestBridge(t, nil, nil)
+	tests := []struct {
+		uri string
+		ok  bool
+	}{
+		{uri: "https://webhook.site/39354f08-2d8d-4101-ab74-45b4f7ac7490", ok: false},
+		{uri: "https://claude.ai.evil.com/api/mcp/auth_callback", ok: false},
+		{uri: "https://evilclaude.ai/api/mcp/auth_callback", ok: false},
+		{uri: "https://claude.ai/api/mcp/auth_callback/extra", ok: false},
+		{uri: "https://claude.ai/api/mcp/auth_callback/../../steal", ok: false},
+		{uri: "https://chatgpt.com/other", ok: false},
+		{uri: "https://127.0.0.1.evil.com/callback", ok: false},
+		{uri: "https://user@claude.ai/api/mcp/auth_callback", ok: false},
+		{uri: "https://claude.ai/api/mcp/auth_callback#frag", ok: false},
+		{uri: "javascript:alert(1)", ok: false},
+		{uri: "http://10.0.0.1/callback", ok: false},
+		{uri: "https://claude.ai/api/mcp/auth_callback", ok: true},
+		{uri: "https://claude.com/api/mcp/auth_callback", ok: true},
+		{uri: "https://chatgpt.com/connector_platform_oauth_redirect", ok: true},
+		{uri: "https://chatgpt.com/connector/oauth/cb_123", ok: true},
+		{uri: "https://www.cursor.com/agents/mcp/oauth/callback", ok: true},
+		{uri: "https://platform.openai.com/apps-manage/oauth", ok: true},
+		{uri: "http://127.0.0.1:8765/callback", ok: true},
+		{uri: "http://localhost:53280/callback", ok: true},
+		{uri: "http://[::1]:8080/callback", ok: true},
+	}
+	for _, test := range tests {
+		err := bridge.validateClientRedirectURI(test.uri)
+		if test.ok && err != nil {
+			t.Fatalf("redirect %s rejected: %v", test.uri, err)
+		}
+		if !test.ok && err == nil {
+			t.Fatalf("redirect %s was allowed", test.uri)
+		}
+	}
+
+	custom := newPolicyTestBridge(t, []string{"customer.example"}, []string{"https://partner.example/oauth/callback"})
+	if err := custom.validateClientRedirectURI("https://customer.example/any/path"); err != nil {
+		t.Fatalf("operator host allowlist rejected a redirect: %v", err)
+	}
+	if err := custom.validateClientRedirectURI("https://partner.example/oauth/callback"); err != nil {
+		t.Fatalf("operator URI allowlist rejected a redirect: %v", err)
+	}
+	if err := custom.validateClientRedirectURI("https://partner.example/oauth/callback/extra"); err == nil {
+		t.Fatal("exact URI allowlist matched a longer path")
+	}
+}
+
+func TestOAuthConsentShowsDestinationAndDenialDoesNotIssueCode(t *testing.T) {
+	handler := newTestOAuthBridgeHandler(t, "https://api.pipeops.test")
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	registration := postJSON(t, server.URL+"/oauth/register", `{
+		"redirect_uris":["https://claude.ai/api/mcp/auth_callback"],
+		"token_endpoint_auth_method":"none",
+		"client_name":"Claude <script>"
+	}`)
+	if registration.StatusCode != http.StatusCreated {
+		t.Fatalf("register named client status = %d; body = %s", registration.StatusCode, registration.Body)
+	}
+	var named struct {
+		ClientID string `json:"client_id"`
+	}
+	if err := json.Unmarshal([]byte(registration.Body), &named); err != nil || named.ClientID == "" {
+		t.Fatalf("decode named client: %v", err)
+	}
+	clientID := named.ClientID
+
+	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	authorizeURL := server.URL + "/oauth/authorize?" + url.Values{
+		"client_id":             {clientID},
+		"redirect_uri":          {"https://claude.ai/api/mcp/auth_callback"},
+		"response_type":         {"code"},
+		"scope":                 {"api:read api:write"},
+		"code_challenge":        {strings.Repeat("a", 43)},
+		"code_challenge_method": {"S256"},
+		"state":                 {"consent-state"},
+	}.Encode()
+	response, err := noRedirect.Get(authorizeURL)
+	if err != nil {
+		t.Fatalf("open consent page: %v", err)
+	}
+	page, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	body := string(page)
+	if response.StatusCode != http.StatusOK || !strings.Contains(body, "claude.ai") || !strings.Contains(body, "Claude &lt;script&gt;") {
+		t.Fatalf("consent page status = %d; body = %s", response.StatusCode, body)
+	}
+	if strings.Contains(body, "<script>") {
+		t.Fatal("consent page rendered client_name as HTML")
+	}
+	denied, err := noRedirect.PostForm(server.URL+"/oauth/authorize", url.Values{
+		"request_id": {hiddenInput(t, body, "request_id")},
+		"consent":    {hiddenInput(t, body, "consent")},
+		"decision":   {"deny"},
+	})
+	if err != nil {
+		t.Fatalf("deny authorization: %v", err)
+	}
+	defer func() { _ = denied.Body.Close() }()
+	location := denied.Header.Get("Location")
+	if denied.StatusCode != http.StatusFound || !strings.Contains(location, "error=access_denied") || strings.Contains(location, "code=") {
+		t.Fatalf("denied authorization status = %d; location = %s", denied.StatusCode, location)
+	}
+	replay, err := noRedirect.PostForm(server.URL+"/oauth/authorize", url.Values{
+		"request_id": {hiddenInput(t, body, "request_id")},
+		"consent":    {hiddenInput(t, body, "consent")},
+		"decision":   {"approve"},
+	})
+	if err != nil {
+		t.Fatalf("replay consent: %v", err)
+	}
+	defer func() { _ = replay.Body.Close() }()
+	if replay.StatusCode != http.StatusBadRequest || replay.Header.Get("Location") != "" {
+		t.Fatalf("replayed consent status = %d; location = %s", replay.StatusCode, replay.Header.Get("Location"))
+	}
+}
+
+func TestOAuthBridgeRejectsStoredUntrustedClient(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "console_access", "refresh_token": "console_refresh", "expires_in": 3600})
+		case "/profile/data":
+			_, _ = io.WriteString(w, `{"success":true,"message":"ok","data":{"user":{"uuid":"user-1"}}}`)
+		default:
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		}
+	}))
+	defer api.Close()
+
+	store := newMemoryOAuthStore()
+	handler := newTestOAuthBridgeHandlerWithStore(t, api.URL, store)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	clientID := registerOAuthClient(t, server.URL, "http://127.0.0.1:8765/callback")
+	var client oauthClientRecord
+	if err := getOAuthJSON(context.Background(), store, "client:"+clientID, &client); err != nil {
+		t.Fatalf("load registered client: %v", err)
+	}
+	client.RedirectURIs = []string{"https://webhook.site/steal"}
+	client.ClientName = "Malicious Client"
+	if err := putOAuthJSON(context.Background(), store, "client:"+clientID, &client, time.Hour); err != nil {
+		t.Fatalf("store untrusted client: %v", err)
+	}
+
+	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	response, err := noRedirect.Get(server.URL + "/oauth/authorize?" + url.Values{
+		"client_id":             {clientID},
+		"redirect_uri":          {"https://webhook.site/steal"},
+		"response_type":         {"code"},
+		"code_challenge":        {strings.Repeat("a", 43)},
+		"code_challenge_method": {"S256"},
+		"state":                 {"stolen_token_proof"},
+	}.Encode())
+	if err != nil {
+		t.Fatalf("authorize stored untrusted client: %v", err)
+	}
+	body, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || response.Header.Get("Location") != "" || strings.Contains(string(body), "webhook.site") {
+		t.Fatalf("stored untrusted authorize status = %d; location = %s; body = %s", response.StatusCode, response.Header.Get("Location"), body)
+	}
+
+	trustedID := registerOAuthClient(t, server.URL, "http://127.0.0.1:8765/callback")
+	verifier := strings.Repeat("v", 64)
+	digest := sha256.Sum256([]byte(verifier))
+	location := approveOAuthConsent(t, server.URL, server.URL+"/oauth/authorize?"+url.Values{
+		"client_id":             {trustedID},
+		"redirect_uri":          {"http://127.0.0.1:8765/callback"},
+		"response_type":         {"code"},
+		"scope":                 {"api:read"},
+		"resource":              {"https://mcp.pipeops.test/mcp"},
+		"state":                 {"state-123"},
+		"code_challenge":        {base64.RawURLEncoding.EncodeToString(digest[:])},
+		"code_challenge_method": {"S256"},
+	}.Encode())
+	code := completeConsoleAuthorization(t, server.URL, location, "console-code")
+	tokens := exchangeOAuthCode(t, server.URL, trustedID, code, verifier)
+
+	if err := getOAuthJSON(context.Background(), store, "client:"+trustedID, &client); err != nil {
+		t.Fatalf("load trusted client: %v", err)
+	}
+	client.RedirectURIs = []string{"https://webhook.site/steal"}
+	if err := putOAuthJSON(context.Background(), store, "client:"+trustedID, &client, time.Hour); err != nil {
+		t.Fatalf("replace trusted redirects: %v", err)
+	}
+	revoked := postOAuthForm(t, server.URL+"/oauth/token", url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {trustedID},
+		"refresh_token": {tokens.RefreshToken},
+	})
+	if revoked.StatusCode != http.StatusBadRequest || !strings.Contains(revoked.Body, "no longer allowed") {
+		t.Fatalf("refresh for untrusted client = %#v", revoked)
+	}
+	mcpRequest, err := http.NewRequest(http.MethodPost, server.URL+"/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize"}`))
+	if err != nil {
+		t.Fatalf("build mcp request: %v", err)
+	}
+	mcpRequest.Header.Set("Authorization", "Bearer "+tokens.AccessToken)
+	mcpRequest.Header.Set("Content-Type", "application/json")
+	mcpRequest.Header.Set("Accept", "application/json, text/event-stream")
+	mcpResponse, err := http.DefaultClient.Do(mcpRequest)
+	if err != nil {
+		t.Fatalf("call mcp with untrusted client token: %v", err)
+	}
+	defer func() { _ = mcpResponse.Body.Close() }()
+	if mcpResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("untrusted client access status = %d", mcpResponse.StatusCode)
+	}
+}
+
+func newPolicyTestBridge(t *testing.T, hosts, uris []string) *oauthBridge {
+	t.Helper()
+	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	cipher, err := newCredentialCipher(key)
+	if err != nil {
+		t.Fatalf("create cipher: %v", err)
+	}
+	bridge, err := newOAuthBridge(oauthBridgeConfig{
+		Issuer:             "https://mcp.pipeops.test",
+		ResourceURL:        "https://mcp.pipeops.test/mcp",
+		BaseURL:            "https://api.pipeops.test",
+		ConsoleURL:         "https://console.pipeops.test",
+		ConsoleClientID:    "pipeops_public_client",
+		ConsoleScopes:      []string{"openid"},
+		Scopes:             []string{"api:read", "api:write"},
+		Store:              newMemoryOAuthStore(),
+		Cipher:             cipher,
+		RedirectAllowHosts: hosts,
+		RedirectAllowURIs:  uris,
+	})
+	if err != nil {
+		t.Fatalf("newOAuthBridge: %v", err)
+	}
+	return bridge
 }
 
 func postOAuthForm(t *testing.T, endpoint string, values url.Values) testHTTPResponse {
