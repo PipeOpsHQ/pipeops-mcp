@@ -18,15 +18,15 @@ import (
 )
 
 const (
-	defaultBaseURL         = "https://api.pipeops.io"
-	defaultResourceURL     = "https://mcp.pipeops.app/mcp"
-	defaultHTTPAddr        = ":8080"
-	defaultMaxBodySize     = int64(4 << 20)
-	defaultOAuthStore = "sqlite"
+	defaultBaseURL     = "https://api.pipeops.io"
+	defaultResourceURL = "https://mcp.pipeops.app/mcp"
+	defaultHTTPAddr    = ":8080"
+	defaultMaxBodySize = int64(4 << 20)
+	defaultOAuthStore  = "sqlite"
 	// Default under /data so a PVC mounted at /data keeps OAuth sessions across
 	// pod restarts. Container runs as root so root-owned volumes work without
 	// fsGroup/UID remapping. Override with PIPEOPS_OAUTH_SQLITE_PATH if needed.
-	defaultSQLitePath = "/data/oauth/pipeops-mcp-oauth.db"
+	defaultSQLitePath      = "/data/oauth/pipeops-mcp-oauth.db"
 	defaultConsoleURL      = "https://console.pipeops.io"
 	defaultConsoleClientID = "pipeops_public_client"
 )
@@ -54,40 +54,44 @@ func (h *HTTPHandler) Close() error {
 
 // HTTPConfig configures the hosted Streamable HTTP MCP endpoint.
 type HTTPConfig struct {
-	Addr                string
-	BaseURL             string
-	ResourceURL         string
-	OAuthMode           string
-	AuthorizationServer string
-	OAuthStore          string
-	OAuthSQLitePath     string
-	OAuthRedisURL       string
-	OAuthEncryptionKey  string
-	ConsoleURL          string
-	ConsoleClientID     string
-	ConsoleScopes       []string
-	Scopes              []string
-	MaxBodyBytes        int64
-	oauthStore          oauthStore
+	Addr                    string
+	BaseURL                 string
+	ResourceURL             string
+	OAuthMode               string
+	AuthorizationServer     string
+	OAuthStore              string
+	OAuthSQLitePath         string
+	OAuthRedisURL           string
+	OAuthEncryptionKey      string
+	ConsoleURL              string
+	ConsoleClientID         string
+	ConsoleScopes           []string
+	OAuthRedirectAllowHosts []string
+	OAuthRedirectAllowURIs  []string
+	Scopes                  []string
+	MaxBodyBytes            int64
+	oauthStore              oauthStore
 }
 
 // LoadHTTPConfigFromEnv loads hosted MCP settings from environment variables.
 func LoadHTTPConfigFromEnv() HTTPConfig {
 	config := HTTPConfig{
-		Addr:                strings.TrimSpace(os.Getenv("PIPEOPS_HTTP_ADDR")),
-		BaseURL:             strings.TrimSpace(os.Getenv("PIPEOPS_BASE_URL")),
-		ResourceURL:         strings.TrimSpace(os.Getenv("PIPEOPS_MCP_PUBLIC_URL")),
-		OAuthMode:           strings.ToLower(strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_MODE"))),
-		AuthorizationServer: strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_ISSUER")),
-		OAuthStore:          strings.ToLower(strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_STORE"))),
-		OAuthSQLitePath:     strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_SQLITE_PATH")),
-		OAuthRedisURL:       strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_REDIS_URL")),
-		OAuthEncryptionKey:  strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_ENCRYPTION_KEY")),
-		ConsoleURL:          strings.TrimSpace(os.Getenv("PIPEOPS_CONSOLE_OAUTH_URL")),
-		ConsoleClientID:     strings.TrimSpace(os.Getenv("PIPEOPS_CONSOLE_OAUTH_CLIENT_ID")),
-		ConsoleScopes:       splitList(os.Getenv("PIPEOPS_CONSOLE_OAUTH_SCOPES")),
-		Scopes:              splitList(os.Getenv("PIPEOPS_MCP_SCOPES")),
-		MaxBodyBytes:        defaultMaxBodySize,
+		Addr:                    strings.TrimSpace(os.Getenv("PIPEOPS_HTTP_ADDR")),
+		BaseURL:                 strings.TrimSpace(os.Getenv("PIPEOPS_BASE_URL")),
+		ResourceURL:             strings.TrimSpace(os.Getenv("PIPEOPS_MCP_PUBLIC_URL")),
+		OAuthMode:               strings.ToLower(strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_MODE"))),
+		AuthorizationServer:     strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_ISSUER")),
+		OAuthStore:              strings.ToLower(strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_STORE"))),
+		OAuthSQLitePath:         strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_SQLITE_PATH")),
+		OAuthRedisURL:           strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_REDIS_URL")),
+		OAuthEncryptionKey:      strings.TrimSpace(os.Getenv("PIPEOPS_OAUTH_ENCRYPTION_KEY")),
+		ConsoleURL:              strings.TrimSpace(os.Getenv("PIPEOPS_CONSOLE_OAUTH_URL")),
+		ConsoleClientID:         strings.TrimSpace(os.Getenv("PIPEOPS_CONSOLE_OAUTH_CLIENT_ID")),
+		ConsoleScopes:           splitList(os.Getenv("PIPEOPS_CONSOLE_OAUTH_SCOPES")),
+		OAuthRedirectAllowHosts: splitList(os.Getenv("PIPEOPS_OAUTH_REDIRECT_ALLOW_HOSTS")),
+		OAuthRedirectAllowURIs:  splitList(os.Getenv("PIPEOPS_OAUTH_REDIRECT_ALLOW_URIS")),
+		Scopes:                  splitList(os.Getenv("PIPEOPS_MCP_SCOPES")),
+		MaxBodyBytes:            defaultMaxBodySize,
 	}
 	if config.Addr == "" {
 		config.Addr = defaultHTTPAddr
@@ -164,15 +168,17 @@ func NewHTTPHandler(config HTTPConfig) (*HTTPHandler, error) {
 			ownedStore, _ = store.(interface{ Close() error })
 		}
 		bridge, err = newOAuthBridge(oauthBridgeConfig{
-			Issuer:          issuer,
-			ResourceURL:     config.ResourceURL,
-			BaseURL:         config.BaseURL,
-			ConsoleURL:      config.ConsoleURL,
-			ConsoleClientID: config.ConsoleClientID,
-			ConsoleScopes:   config.ConsoleScopes,
-			Scopes:          config.Scopes,
-			Store:           store,
-			Cipher:          credentialCipher,
+			Issuer:             issuer,
+			ResourceURL:        config.ResourceURL,
+			BaseURL:            config.BaseURL,
+			ConsoleURL:         config.ConsoleURL,
+			ConsoleClientID:    config.ConsoleClientID,
+			ConsoleScopes:      config.ConsoleScopes,
+			Scopes:             config.Scopes,
+			Store:              store,
+			Cipher:             credentialCipher,
+			RedirectAllowHosts: config.OAuthRedirectAllowHosts,
+			RedirectAllowURIs:  config.OAuthRedirectAllowURIs,
 		})
 		if err != nil {
 			if ownedStore != nil {

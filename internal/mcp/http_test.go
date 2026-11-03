@@ -28,6 +28,8 @@ func TestLoadHTTPConfigFromEnvUsesCanonicalPublicURL(t *testing.T) {
 	t.Setenv("PIPEOPS_OAUTH_SQLITE_PATH", "")
 	t.Setenv("PIPEOPS_OAUTH_REDIS_URL", "")
 	t.Setenv("PIPEOPS_OAUTH_ENCRYPTION_KEY", "")
+	t.Setenv("PIPEOPS_OAUTH_REDIRECT_ALLOW_HOSTS", "")
+	t.Setenv("PIPEOPS_OAUTH_REDIRECT_ALLOW_URIS", "")
 	t.Setenv("PIPEOPS_MCP_SCOPES", "")
 
 	config := LoadHTTPConfigFromEnv()
