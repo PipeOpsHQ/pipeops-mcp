@@ -25,11 +25,13 @@ https://mcp.pipeops.app/mcp
 ```
 
 When the hosted service runs with `PIPEOPS_OAUTH_MODE=bridge`, OAuth-capable
-clients discover the authorization server automatically. The PipeOps consent
-flow opens the PipeOps Console, where the customer signs in with the same PKCE
-OAuth flow as `pipeops login`. The bridge returns short-lived, scoped OAuth
-credentials to the MCP client. The Console access and refresh credentials are
-encrypted at rest and are never returned to the client.
+clients discover the authorization server automatically. The customer first
+confirms the MCP client and the host that will receive the authorization code,
+then signs in at the PipeOps Console with the same PKCE OAuth flow as
+`pipeops login`. Only loopback redirects and known MCP callback URLs are
+accepted. The bridge returns short-lived, scoped OAuth credentials to the MCP
+client. The Console access and refresh credentials are encrypted at rest and
+are never returned to the client.
 
 Clients that support static request headers can continue to connect directly:
 
@@ -81,6 +83,8 @@ Hosted transport configuration:
 - `PIPEOPS_OAUTH_REDIS_URL` is required only when `PIPEOPS_OAUTH_STORE=redis`
 - `PIPEOPS_OAUTH_ENCRYPTION_KEY` is required in `bridge` mode and must be a base64-encoded 32-byte key
 - `PIPEOPS_OAUTH_ISSUER` optionally overrides the bridge issuer and is required in `external` mode
+- `PIPEOPS_OAUTH_REDIRECT_ALLOW_HOSTS` adds extra HTTPS hosts that may receive authorization codes
+- `PIPEOPS_OAUTH_REDIRECT_ALLOW_URIS` adds exact extra HTTPS redirect URIs
 - `PIPEOPS_MCP_SCOPES` optionally overrides the comma-separated scopes (defaults to `api:read,api:write`)
 - `PIPEOPS_CONSOLE_OAUTH_URL` optionally overrides the Console URL (defaults to `https://console.pipeops.io`)
 - `PIPEOPS_CONSOLE_OAUTH_CLIENT_ID` optionally overrides the Console public OAuth client (defaults to `pipeops_public_client`)

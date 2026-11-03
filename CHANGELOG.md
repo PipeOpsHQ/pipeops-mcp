@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+- Reject OAuth dynamic client registration and authorization for redirect URIs that are not loopback or a known MCP callback. Previously any `https` redirect was accepted, so an unauthenticated caller could register a client and receive a PipeOps user's authorization code after that user signed in.
+- Require an explicit consent step that shows the client name and redirect host before sending the user to the PipeOps Console.
+- Refuse access and refresh tokens when the registered client's redirect URIs no longer pass that policy.
+
 ## [1.4.2] - 2026-07-18
 
 ### Fixed

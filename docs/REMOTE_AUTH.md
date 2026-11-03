@@ -141,6 +141,38 @@ tokens, and 30 days for refresh tokens. Authorization codes are single-use and
 refresh tokens rotate on every use. Reusing an already-rotated refresh token
 revokes the active refresh token in that authorization family.
 
+## Redirect allowlist and consent
+
+Dynamic client registration stays enabled so MCP clients such as Claude, ChatGPT,
+and Cursor can obtain a client ID. Registration does not accept an arbitrary
+`redirect_uri`. A redirect is accepted only when it is:
+
+- loopback HTTP or HTTPS (`localhost`, `127.0.0.1`, or `::1`), used by local MCP clients, or
+- HTTPS on a known MCP callback host and path (Claude, ChatGPT, Cursor, VS Code, and the OpenAI review callback).
+
+`POST /oauth/register` rejects every other redirect, including public request-bin
+hosts. `/oauth/authorize` checks the same policy again, including for clients
+that were stored before the policy existed. Access and refresh tokens for a
+client whose redirects no longer pass the policy are refused.
+
+Before the bridge sends the customer to the PipeOps Console, it shows a consent
+page naming the client and the host that will receive the authorization code.
+The customer must continue or cancel. The consent form is a single-use POST and
+cannot be framed.
+
+To allow another HTTPS client, set one of these. Hosts allow any safe path on
+that host. URIs are exact and must be `https` with no query or fragment.
+
+```text
+PIPEOPS_OAUTH_REDIRECT_ALLOW_HOSTS=customer.example
+PIPEOPS_OAUTH_REDIRECT_ALLOW_URIS=https://partner.example/oauth/callback
+```
+
+Registration is limited to 20 requests per minute per instance, keyed by the
+connection address. Keep a stricter distributed limit at the ingress as well.
+New registrations are logged with the client ID, name, and redirect hosts.
+Authorization codes, tokens, and client secrets are not logged.
+
 ## Security and operations
 
 - Use TLS for the public MCP endpoint and for Redis when selected.
