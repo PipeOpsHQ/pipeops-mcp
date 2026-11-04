@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Refuse access and refresh tokens when the registered client's redirect URIs no longer pass that policy.
 
 ### Fixed
-- Treat an ended PipeOps session (HTTP 419) as an invalid MCP credential so clients sign in again. That response previously became HTTP 503, and clients kept using the dead token.
+- Renew an ended PipeOps session (HTTP 419) with the stored PipeOps refresh token and continue the MCP request. A session that cannot be renewed, including a direct bearer token, is an invalid credential (HTTP 401). Upstream outages stay HTTP 503.
 
 ## [1.4.2] - 2026-07-18
 

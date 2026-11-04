@@ -364,7 +364,7 @@ func assertToolAnnotations(t *testing.T, tools []*sdkmcp.Tool) {
 	}
 }
 
-func TestHTTPHandlerSessionExpiredPromptsReauthentication(t *testing.T) {
+func TestHTTPHandlerDirectBearerSessionExpiredPromptsReauthentication(t *testing.T) {
 	t.Parallel()
 
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -775,6 +775,55 @@ func (credential consoleCredential) needsRefresh(now time.Time) bool {
 	return !credential.ExpiresAt.IsZero() && !credential.ExpiresAt.After(now.Add(time.Minute))
 }
 
+// ensureLiveConsoleCredential returns a Console credential the controller
+// currently accepts. A credential inside its expiry skew is refreshed first.
+// An ended product session (HTTP 419) is refreshed once, even when the access
+// token's expiry is still in the future. HTTP 401 and 403 are not refreshed.
+func (b *oauthBridge) ensureLiveConsoleCredential(ctx context.Context, record oauthGrantRecord, credential consoleCredential) (consoleCredential, error) {
+	refreshed := false
+	if credential.needsRefresh(b.now()) {
+		next, err := b.renewConsoleCredential(ctx, record, credential)
+		if err != nil {
+			return consoleCredential{}, err
+		}
+		credential = next
+		refreshed = true
+	}
+	info, err := controllerTokenVerifier(b.baseURL)(ctx, credential.AccessToken, nil)
+	if errors.Is(err, errPipeOpsSessionExpired) && !refreshed {
+		next, refreshErr := b.renewConsoleCredential(ctx, record, credential)
+		if refreshErr != nil {
+			return consoleCredential{}, refreshErr
+		}
+		credential = next
+		info, err = controllerTokenVerifier(b.baseURL)(ctx, credential.AccessToken, nil)
+	}
+	if err != nil {
+		if errors.Is(err, auth.ErrInvalidToken) || errors.Is(err, errPipeOpsSessionExpired) {
+			return consoleCredential{}, errOAuthRecordNotFound
+		}
+		return consoleCredential{}, err
+	}
+	if info == nil || info.UserID != record.UserID {
+		return consoleCredential{}, errOAuthRecordNotFound
+	}
+	return credential, nil
+}
+
+// renewConsoleCredential exchanges the stored PipeOps refresh token and
+// persists the replacement before the caller verifies it. Persisting first
+// keeps a rotated refresh token if verification is briefly unavailable.
+func (b *oauthBridge) renewConsoleCredential(ctx context.Context, record oauthGrantRecord, credential consoleCredential) (consoleCredential, error) {
+	renewed, err := b.refreshConsoleCredential(ctx, credential)
+	if err != nil {
+		return consoleCredential{}, errOAuthRecordNotFound
+	}
+	if err := b.storeConsoleCredential(ctx, record.CredentialID, record.UserID, renewed); err != nil {
+		return consoleCredential{}, err
+	}
+	return renewed, nil
+}
+
 func (b *oauthBridge) sealConsoleCredential(credentialID, userID string, credential consoleCredential) (string, error) {
 	encoded, err := json.Marshal(credential)
 	if err != nil {
@@ -935,17 +984,14 @@ func (b *oauthBridge) exchangeRefreshToken(w http.ResponseWriter, r *http.Reques
 		}
 		record.Scopes = scopes
 	}
-	if credential.needsRefresh(b.now()) {
-		credential, err = b.refreshConsoleCredential(r.Context(), credential)
-		if err != nil {
-			_ = b.store.Delete(r.Context(), oauthLookupKey("credential", record.CredentialID))
+	credential, err = b.ensureLiveConsoleCredential(r.Context(), record, credential)
+	if err != nil {
+		if errors.Is(err, errOAuthRecordNotFound) {
 			b.writeTokenError(w, http.StatusBadRequest, "invalid_grant", "PipeOps authorization has expired")
 			return
 		}
-		if err := b.storeConsoleCredential(r.Context(), record.CredentialID, record.UserID, credential); err != nil {
-			b.writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "token service unavailable")
-			return
-		}
+		b.writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "token service unavailable")
+		return
 	}
 	if record.CredentialID == "" {
 		b.writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "token service unavailable")
@@ -1190,27 +1236,9 @@ func (b *oauthBridge) resolveAccessToken(ctx context.Context, token string) (*ve
 	if err != nil {
 		return nil, errOAuthRecordNotFound
 	}
-	if credential.needsRefresh(b.now()) {
-		credential, err = b.refreshConsoleCredential(ctx, credential)
-		if err != nil {
-			return nil, errOAuthRecordNotFound
-		}
-		if err := b.storeConsoleCredential(ctx, record.CredentialID, record.UserID, credential); err != nil {
-			return nil, err
-		}
-	}
-	info, err := controllerTokenVerifier(b.baseURL)(ctx, credential.AccessToken, nil)
+	credential, err = b.ensureLiveConsoleCredential(ctx, record, credential)
 	if err != nil {
-		if errors.Is(err, auth.ErrInvalidToken) {
-			return nil, errOAuthRecordNotFound
-		}
 		return nil, err
-	}
-	if info == nil {
-		return nil, errOAuthRecordNotFound
-	}
-	if info.UserID != record.UserID {
-		return nil, errOAuthRecordNotFound
 	}
 	return &verifiedCredential{
 		UpstreamToken: credential.AccessToken,

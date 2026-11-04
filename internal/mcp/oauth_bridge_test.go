@@ -527,6 +527,232 @@ func TestOAuthBridgeRefreshesExpiredConsoleCredential(t *testing.T) {
 	}
 }
 
+func TestOAuthBridgeRenewsEndedConsoleSession(t *testing.T) {
+	tests := []struct {
+		name             string
+		refreshToken     string
+		profileStatus    int
+		renewedStatus    int
+		wantToken        string
+		wantRefreshCalls int
+		wantNotFound     bool
+		wantUnavailable  bool
+	}{
+		{
+			name:             "ended session renews before expiry",
+			refreshToken:     "old-refresh",
+			profileStatus:    pipeOpsSessionExpired,
+			renewedStatus:    http.StatusOK,
+			wantToken:        "renewed-access",
+			wantRefreshCalls: 1,
+		},
+		{
+			name:             "ended session without refresh token",
+			profileStatus:    pipeOpsSessionExpired,
+			renewedStatus:    http.StatusOK,
+			wantNotFound:     true,
+			wantRefreshCalls: 0,
+		},
+		{
+			name:             "rejected credential is not renewed",
+			refreshToken:     "old-refresh",
+			profileStatus:    http.StatusUnauthorized,
+			renewedStatus:    http.StatusOK,
+			wantNotFound:     true,
+			wantRefreshCalls: 0,
+		},
+		{
+			name:             "renewed token that is still ended is not refreshed twice",
+			refreshToken:     "old-refresh",
+			profileStatus:    pipeOpsSessionExpired,
+			renewedStatus:    pipeOpsSessionExpired,
+			wantNotFound:     true,
+			wantRefreshCalls: 1,
+		},
+		{
+			name:             "upstream outage is not treated as an ended session",
+			refreshToken:     "old-refresh",
+			profileStatus:    http.StatusServiceUnavailable,
+			renewedStatus:    http.StatusOK,
+			wantUnavailable:  true,
+			wantRefreshCalls: 0,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var refreshCalls int
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/oauth/token":
+					var request map[string]string
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["grant_type"] != "refresh_token" || request["refresh_token"] != "old-refresh" {
+						http.Error(w, "invalid refresh", http.StatusBadRequest)
+						return
+					}
+					refreshCalls++
+					_, _ = io.WriteString(w, `{"access_token":"renewed-access","refresh_token":"renewed-refresh","expires_in":3600}`)
+				case "/profile/data":
+					token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+					status := test.profileStatus
+					if token == "renewed-access" {
+						status = test.renewedStatus
+					}
+					if status == http.StatusOK {
+						_, _ = io.WriteString(w, `{"success":true,"data":{"user":{"uuid":"user-1"}}}`)
+						return
+					}
+					w.WriteHeader(status)
+					_, _ = io.WriteString(w, `{"error":"session has ended. Please log in again."}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer api.Close()
+
+			bridge := newConsoleRefreshBridge(t, api.URL)
+			credentialID := "pocr_ended"
+			grant := oauthGrantRecord{ClientID: "pomcp_testclient", Scopes: []string{"api:read"}, Resource: "https://mcp.pipeops.test/mcp", CredentialID: credentialID, UserID: "user-1"}
+			credential := consoleCredential{AccessToken: "ended-access", RefreshToken: test.refreshToken, ExpiresAt: time.Now().Add(time.Hour)}
+			if err := bridge.storeConsoleCredential(context.Background(), credentialID, "user-1", credential); err != nil {
+				t.Fatalf("store Console credential: %v", err)
+			}
+			if err := putOAuthJSON(context.Background(), bridge.store, oauthLookupKey("access", "poat_ended"), &grant, oauthAccessTokenTTL); err != nil {
+				t.Fatalf("store grant: %v", err)
+			}
+
+			resolved, err := bridge.resolveAccessToken(context.Background(), "poat_ended")
+			if refreshCalls != test.wantRefreshCalls {
+				t.Fatalf("refresh calls = %d, want %d", refreshCalls, test.wantRefreshCalls)
+			}
+			switch {
+			case test.wantNotFound:
+				if !errors.Is(err, errOAuthRecordNotFound) {
+					t.Fatalf("resolve = %#v, %v; want not found", resolved, err)
+				}
+			case test.wantUnavailable:
+				if err == nil || errors.Is(err, errOAuthRecordNotFound) || !strings.Contains(err.Error(), "unavailable") {
+					t.Fatalf("resolve = %#v, %v; want unavailable", resolved, err)
+				}
+			default:
+				if err != nil || resolved == nil || resolved.UpstreamToken != test.wantToken {
+					t.Fatalf("resolve = %#v, %v; want upstream %s", resolved, err, test.wantToken)
+				}
+				stored, err := bridge.openGrantCredential(context.Background(), grant)
+				if err != nil || stored.AccessToken != "renewed-access" || stored.RefreshToken != "renewed-refresh" {
+					t.Fatalf("persisted renewed credential = %#v, err = %v", stored, err)
+				}
+			}
+		})
+	}
+}
+
+func TestOAuthBridgeRefreshGrantRenewsEndedConsoleSession(t *testing.T) {
+	var refreshCalls int
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			var request map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil || request["grant_type"] != "refresh_token" || request["refresh_token"] != "old-refresh" {
+				http.Error(w, "invalid refresh", http.StatusBadRequest)
+				return
+			}
+			refreshCalls++
+			_, _ = io.WriteString(w, `{"access_token":"renewed-access","refresh_token":"renewed-refresh","expires_in":3600}`)
+		case "/profile/data":
+			token := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+			if token == "ended-access" {
+				w.WriteHeader(pipeOpsSessionExpired)
+				_, _ = io.WriteString(w, `{"error":"session has ended. Please log in again."}`)
+				return
+			}
+			if token != "renewed-access" {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			_, _ = io.WriteString(w, `{"success":true,"data":{"user":{"uuid":"user-1"}}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer api.Close()
+
+	bridge := newConsoleRefreshBridge(t, api.URL)
+	credentialID := "pocr_refresh_grant"
+	familyID := "porf_refresh_grant"
+	grant := oauthGrantRecord{
+		ClientID:     "pomcp_testclient",
+		FamilyID:     familyID,
+		Scopes:       []string{"api:read"},
+		Resource:     "https://mcp.pipeops.test/mcp",
+		CredentialID: credentialID,
+		UserID:       "user-1",
+	}
+	credential := consoleCredential{AccessToken: "ended-access", RefreshToken: "old-refresh", ExpiresAt: time.Now().Add(time.Hour)}
+	if err := bridge.storeConsoleCredential(context.Background(), credentialID, "user-1", credential); err != nil {
+		t.Fatalf("store Console credential: %v", err)
+	}
+	refreshToken := "port_ended"
+	refreshKey := oauthLookupKey("refresh", refreshToken)
+	if err := putOAuthJSON(context.Background(), bridge.store, refreshKey, &grant, oauthRefreshTokenTTL); err != nil {
+		t.Fatalf("store refresh grant: %v", err)
+	}
+	if err := bridge.store.Put(context.Background(), oauthRefreshFamilyKey(familyID), []byte(refreshKey), oauthRefreshTokenTTL); err != nil {
+		t.Fatalf("store refresh family: %v", err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/oauth/token", strings.NewReader(url.Values{
+		"grant_type":    {"refresh_token"},
+		"client_id":     {"pomcp_testclient"},
+		"refresh_token": {refreshToken},
+	}.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	recorder := httptest.NewRecorder()
+	bridge.handleToken(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("refresh grant status = %d; body = %s", recorder.Code, recorder.Body.String())
+	}
+	if refreshCalls != 1 {
+		t.Fatalf("console refresh calls = %d, want 1", refreshCalls)
+	}
+	stored, err := bridge.openGrantCredential(context.Background(), grant)
+	if err != nil || stored.AccessToken != "renewed-access" || stored.RefreshToken != "renewed-refresh" {
+		t.Fatalf("persisted renewed credential = %#v, err = %v", stored, err)
+	}
+}
+
+func newConsoleRefreshBridge(t *testing.T, baseURL string) *oauthBridge {
+	t.Helper()
+	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
+	cipher, err := newCredentialCipher(key)
+	if err != nil {
+		t.Fatalf("create cipher: %v", err)
+	}
+	store := newMemoryOAuthStore()
+	bridge, err := newOAuthBridge(oauthBridgeConfig{
+		Issuer:          "https://mcp.pipeops.test",
+		ResourceURL:     "https://mcp.pipeops.test/mcp",
+		BaseURL:         baseURL,
+		ConsoleURL:      "https://console.pipeops.test",
+		ConsoleClientID: "pipeops_public_client",
+		ConsoleScopes:   []string{"openid", "profile", "email"},
+		Scopes:          []string{"api:read"},
+		Store:           store,
+		Cipher:          cipher,
+	})
+	if err != nil {
+		t.Fatalf("create bridge: %v", err)
+	}
+	if err := putOAuthJSON(context.Background(), store, "client:pomcp_testclient", &oauthClientRecord{
+		ClientID:                "pomcp_testclient",
+		RedirectURIs:            []string{"http://127.0.0.1:8765/callback"},
+		TokenEndpointAuthMethod: "none",
+		ClientName:              "Test AI client",
+	}, time.Hour); err != nil {
+		t.Fatalf("store client: %v", err)
+	}
+	return bridge
+}
+
 func TestOAuthRevocationFailsClosedWhenStoreIsUnavailable(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef"))
 	store := &failingGrantReadStore{oauthStore: newMemoryOAuthStore()}
