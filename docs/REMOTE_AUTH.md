@@ -132,9 +132,11 @@ The bridge exposes two scopes:
 - `api:write` exposes read and mutating tools.
 
 The upstream PipeOps user session remains the final authority. An OAuth grant
-cannot grant tools outside its MCP scope, and expired Console credentials require
-the customer to authorize again. Direct Bearer-token clients keep the existing
-tool surface and are authorized by the controller.
+cannot grant tools outside its MCP scope. When that session has ended and the
+bridge still holds a PipeOps refresh token, the bridge renews the credential
+and continues the request. If renewal is rejected, or the client presented a
+direct bearer token, the customer authorizes again. Direct Bearer-token clients
+keep the existing tool surface and are authorized by the controller.
 
 Current lifetimes are 5 minutes for authorization codes, 15 minutes for access
 tokens, and 30 days for refresh tokens. Authorization codes are single-use and
@@ -184,10 +186,12 @@ Authorization codes, tokens, and client secrets are not logged.
   per-instance limiter for registration, authorization, and token requests.
 - Do not log authorization headers, Console access or refresh tokens, OAuth
   codes, or request bodies from authorization and token endpoints.
-- Monitor `401` and `503` rates. Missing/expired credentials fail with `401`;
-  persistence or PipeOps validation failures fail closed with `503`.
-- Customers can disconnect an AI client by revoking its bridge OAuth token;
-  ending or revoking their PipeOps session also stops upstream authorization.
+- Monitor `401` and `503` rates. Missing credentials, and ended sessions that
+  cannot be renewed, fail with `401`. Persistence failures and PipeOps
+  validation outages fail closed with `503`.
+- Customers can disconnect an AI client by revoking its bridge OAuth token.
+  Ending the PipeOps session stops the bridge once the stored refresh token
+  is rejected or absent. A still-valid PipeOps refresh token renews the session.
 
 ## Acceptance checks
 

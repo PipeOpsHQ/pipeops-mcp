@@ -330,11 +330,25 @@ func splitList(value string) []string {
 }
 
 // pipeOpsSessionExpired is the controller status for a bearer token whose
-// product session has ended. It is not an outage: the caller must sign in again.
+// product session has ended. The access token can still be inside its expiry
+// window. It is not an outage. A stored PipeOps refresh token can renew it.
 const pipeOpsSessionExpired = 419
 
-func pipeOpsCredentialRejected(status int) bool {
-	return status == http.StatusUnauthorized || status == http.StatusForbidden || status == pipeOpsSessionExpired
+// errPipeOpsSessionExpired means the controller ended the product session
+// (HTTP 419). Callers that stored a refresh token renew once. HTTP 401 and
+// 403 stay auth.ErrInvalidToken and are not renewed: those credentials were
+// rejected.
+var errPipeOpsSessionExpired = errors.New("PipeOps session expired")
+
+func pipeOpsCredentialError(status int) error {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return auth.ErrInvalidToken
+	case pipeOpsSessionExpired:
+		return errPipeOpsSessionExpired
+	default:
+		return nil
+	}
 }
 
 func controllerTokenVerifier(baseURL string) auth.TokenVerifier {
@@ -347,8 +361,10 @@ func controllerTokenVerifier(baseURL string) auth.TokenVerifier {
 		if strings.HasPrefix(token, "sat_") || strings.HasPrefix(token, "clt_") {
 			workspaces, response, err := client.Workspaces.List(ctx)
 			if err != nil {
-				if response != nil && pipeOpsCredentialRejected(response.StatusCode) {
-					return nil, auth.ErrInvalidToken
+				if response != nil {
+					if statusErr := pipeOpsCredentialError(response.StatusCode); statusErr != nil {
+						return nil, statusErr
+					}
 				}
 				return nil, errors.New("token validation unavailable")
 			}
@@ -366,8 +382,10 @@ func controllerTokenVerifier(baseURL string) auth.TokenVerifier {
 
 		profile, response, err := client.Users.GetProfile(ctx)
 		if err != nil {
-			if response != nil && pipeOpsCredentialRejected(response.StatusCode) {
-				return nil, auth.ErrInvalidToken
+			if response != nil {
+				if statusErr := pipeOpsCredentialError(response.StatusCode); statusErr != nil {
+					return nil, statusErr
+				}
 			}
 			return nil, errors.New("token validation unavailable")
 		}
@@ -410,6 +428,11 @@ func controllerCredentialVerifier(baseURL string, bridge *oauthBridge) credentia
 		}
 		info, err := controllerTokenVerifier(baseURL)(ctx, token, request)
 		if err != nil {
+			// A direct bearer has no stored PipeOps refresh token, so an ended
+			// session cannot be renewed here.
+			if errors.Is(err, errPipeOpsSessionExpired) {
+				return nil, auth.ErrInvalidToken
+			}
 			return nil, err
 		}
 		return &verifiedCredential{UpstreamToken: token, UserID: info.UserID}, nil
