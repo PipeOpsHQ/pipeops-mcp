@@ -364,6 +364,76 @@ func assertToolAnnotations(t *testing.T, tools []*sdkmcp.Tool) {
 	}
 }
 
+func TestHTTPHandlerSessionExpiredPromptsReauthentication(t *testing.T) {
+	t.Parallel()
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/profile/data" {
+			http.Error(w, "unexpected path", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(pipeOpsSessionExpired)
+		_, _ = io.WriteString(w, `{"error":"session has ended. Please log in again."}`)
+	}))
+	defer api.Close()
+
+	handler, err := NewHTTPHandler(HTTPConfig{
+		BaseURL:             api.URL,
+		ResourceURL:         "https://mcp.pipeops.test/mcp",
+		AuthorizationServer: "https://console.pipeops.test",
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPHandler() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Header.Set("Authorization", "Bearer user-session-token")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusUnauthorized, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("WWW-Authenticate"); !strings.Contains(got, `error="invalid_token"`) {
+		t.Fatalf("WWW-Authenticate = %q, want invalid_token", got)
+	}
+}
+
+func TestHTTPHandlerUpstreamOutageStaysUnavailable(t *testing.T) {
+	t.Parallel()
+
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer api.Close()
+
+	handler, err := NewHTTPHandler(HTTPConfig{
+		BaseURL:             api.URL,
+		ResourceURL:         "https://mcp.pipeops.test/mcp",
+		AuthorizationServer: "https://console.pipeops.test",
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPHandler() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}`))
+	req.Header.Set("Authorization", "Bearer user-session-token")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, req)
+
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusServiceUnavailable, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "user-session-token") {
+		t.Fatal("response leaked bearer token")
+	}
+}
+
 func TestHTTPHandlerRejectsInvalidControllerToken(t *testing.T) {
 	t.Parallel()
 

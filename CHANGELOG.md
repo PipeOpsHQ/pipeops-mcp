@@ -13,6 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Require an explicit consent step that shows the client name and redirect host before sending the user to the PipeOps Console.
 - Refuse access and refresh tokens when the registered client's redirect URIs no longer pass that policy.
 
+### Fixed
+- Treat an ended PipeOps session (HTTP 419) as an invalid MCP credential so clients sign in again. That response previously became HTTP 503, and clients kept using the dead token.
+
 ## [1.4.2] - 2026-07-18
 
 ### Fixed

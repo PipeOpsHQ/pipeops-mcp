@@ -329,6 +329,14 @@ func splitList(value string) []string {
 	})
 }
 
+// pipeOpsSessionExpired is the controller status for a bearer token whose
+// product session has ended. It is not an outage: the caller must sign in again.
+const pipeOpsSessionExpired = 419
+
+func pipeOpsCredentialRejected(status int) bool {
+	return status == http.StatusUnauthorized || status == http.StatusForbidden || status == pipeOpsSessionExpired
+}
+
 func controllerTokenVerifier(baseURL string) auth.TokenVerifier {
 	return func(ctx context.Context, token string, _ *http.Request) (*auth.TokenInfo, error) {
 		client, err := pipeops.NewClient(baseURL)
@@ -339,7 +347,7 @@ func controllerTokenVerifier(baseURL string) auth.TokenVerifier {
 		if strings.HasPrefix(token, "sat_") || strings.HasPrefix(token, "clt_") {
 			workspaces, response, err := client.Workspaces.List(ctx)
 			if err != nil {
-				if response != nil && (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+				if response != nil && pipeOpsCredentialRejected(response.StatusCode) {
 					return nil, auth.ErrInvalidToken
 				}
 				return nil, errors.New("token validation unavailable")
@@ -358,7 +366,7 @@ func controllerTokenVerifier(baseURL string) auth.TokenVerifier {
 
 		profile, response, err := client.Users.GetProfile(ctx)
 		if err != nil {
-			if response != nil && (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+			if response != nil && pipeOpsCredentialRejected(response.StatusCode) {
 				return nil, auth.ErrInvalidToken
 			}
 			return nil, errors.New("token validation unavailable")
