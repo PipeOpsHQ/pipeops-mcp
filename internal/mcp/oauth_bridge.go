@@ -495,6 +495,12 @@ func (b *oauthBridge) approveAuthorization(w http.ResponseWriter, r *http.Reques
 	}
 	storedID, err := b.store.Consume(r.Context(), oauthLookupKey("consent", nonce))
 	if err != nil {
+		// A second submit is what the browser does on a double click or when
+		// the user steps back from Console and resubmits the form. The nonce
+		// is already spent; send them on if this request was approved.
+		if decision == "approve" && b.resumeConsentedAuthorization(w, r, requestID) {
+			return
+		}
 		http.Error(w, "authorization request expired or invalid", http.StatusBadRequest)
 		return
 	}
@@ -545,6 +551,31 @@ func (b *oauthBridge) approveAuthorization(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	http.Redirect(w, r, b.consoleAuthorizationURL(consoleState, consoleVerifier), http.StatusFound)
+}
+
+// resumeConsentedAuthorization repeats the Console redirect for an approval
+// that already succeeded. It does not mint a new Console state, so the
+// original callback still matches.
+func (b *oauthBridge) resumeConsentedAuthorization(w http.ResponseWriter, r *http.Request, requestID string) bool {
+	if requestID == "" {
+		return false
+	}
+	var authorization oauthAuthorizationRequest
+	if err := getOAuthJSON(r.Context(), b.store, oauthLookupKey("request", requestID), &authorization); err != nil {
+		return false
+	}
+	if !authorization.Consented || authorization.ID != requestID || authorization.ConsoleState == "" || authorization.EncryptedConsoleVerifier == "" {
+		return false
+	}
+	if b.validateClientRedirectURI(authorization.RedirectURI) != nil {
+		return false
+	}
+	verifier, err := b.cipher.Open(authorization.EncryptedConsoleVerifier, oauthConsoleRequestAdditionalData(authorization.ID))
+	if err != nil {
+		return false
+	}
+	http.Redirect(w, r, b.consoleAuthorizationURL(authorization.ConsoleState, verifier), http.StatusFound)
+	return true
 }
 
 func (b *oauthBridge) renderAuthorizationConsent(w http.ResponseWriter, authorization oauthAuthorizationRequest, nonce string) {

@@ -1114,6 +1114,70 @@ func TestOAuthConsentShowsDestinationAndDenialDoesNotIssueCode(t *testing.T) {
 	}
 }
 
+func TestOAuthConsentReplayResumesConsoleRedirect(t *testing.T) {
+	handler := newTestOAuthBridgeHandler(t, "https://api.pipeops.test")
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	clientID := registerOAuthClient(t, server.URL, "https://claude.ai/api/mcp/auth_callback")
+	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+	authorizeURL := server.URL + "/oauth/authorize?" + url.Values{
+		"client_id":             {clientID},
+		"redirect_uri":          {"https://claude.ai/api/mcp/auth_callback"},
+		"response_type":         {"code"},
+		"scope":                 {"api:read api:write"},
+		"code_challenge":        {strings.Repeat("b", 43)},
+		"code_challenge_method": {"S256"},
+		"state":                 {"resume-state"},
+	}.Encode()
+	response, err := noRedirect.Get(authorizeURL)
+	if err != nil {
+		t.Fatalf("open consent page: %v", err)
+	}
+	page, _ := io.ReadAll(response.Body)
+	_ = response.Body.Close()
+	body := string(page)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("consent page status = %d; body = %s", response.StatusCode, body)
+	}
+	form := url.Values{
+		"request_id": {hiddenInput(t, body, "request_id")},
+		"consent":    {hiddenInput(t, body, "consent")},
+		"decision":   {"approve"},
+	}
+	first, err := noRedirect.PostForm(server.URL+"/oauth/authorize", form)
+	if err != nil {
+		t.Fatalf("approve authorization: %v", err)
+	}
+	defer func() { _ = first.Body.Close() }()
+	location := first.Header.Get("Location")
+	if first.StatusCode != http.StatusFound || !strings.Contains(location, "state=pocs_") || !strings.Contains(location, "redirect_uri=") {
+		t.Fatalf("approve status = %d; location = %s", first.StatusCode, location)
+	}
+	replay, err := noRedirect.PostForm(server.URL+"/oauth/authorize", form)
+	if err != nil {
+		t.Fatalf("replay approved consent: %v", err)
+	}
+	defer func() { _ = replay.Body.Close() }()
+	if replay.StatusCode != http.StatusFound || replay.Header.Get("Location") != location {
+		t.Fatalf("replay status = %d; location = %s; want %s", replay.StatusCode, replay.Header.Get("Location"), location)
+	}
+	wrong, err := noRedirect.PostForm(server.URL+"/oauth/authorize", url.Values{
+		"request_id": {"poar_not-the-request"},
+		"consent":    {form.Get("consent")},
+		"decision":   {"approve"},
+	})
+	if err != nil {
+		t.Fatalf("replay unknown request: %v", err)
+	}
+	defer func() { _ = wrong.Body.Close() }()
+	if wrong.StatusCode != http.StatusBadRequest || wrong.Header.Get("Location") != "" {
+		t.Fatalf("unknown replay status = %d; location = %s", wrong.StatusCode, wrong.Header.Get("Location"))
+	}
+}
+
 func TestOAuthBridgeRejectsStoredUntrustedClient(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
