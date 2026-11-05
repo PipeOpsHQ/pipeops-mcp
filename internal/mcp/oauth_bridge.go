@@ -583,7 +583,7 @@ func (b *oauthBridge) renderAuthorizationConsent(w http.ResponseWriter, authoriz
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", b.consentContentSecurityPolicy(authorization.RedirectURI))
 	w.WriteHeader(http.StatusOK)
 	err := oauthConsentTemplate.Execute(w, oauthConsentView{
 		ClientName:   authorization.ClientName,
@@ -873,6 +873,49 @@ func (b *oauthBridge) storeConsoleCredential(ctx context.Context, credentialID, 
 		return err
 	}
 	return putOAuthJSON(ctx, b.store, oauthLookupKey("credential", credentialID), &oauthCredentialRecord{EncryptedCredential: encrypted, UserID: userID}, oauthRefreshTokenTTL)
+}
+
+// consentContentSecurityPolicy allows the consent form to post here and to
+// follow the redirect that approval or denial returns. Chrome and Safari
+// apply form-action to that redirect, then name the form action in the
+// console even though the blocked URL is the redirect target. The Console
+// origin is the approval target. A redirect origin is included only when
+// this server would already send a denial there. The Cloudflare analytics
+// beacon stays blocked by default-src 'none'.
+func (b *oauthBridge) consentContentSecurityPolicy(redirectURI string) string {
+	sources := []string{"'self'"}
+	if origin := oauthNavigationOrigin(b.consoleURL); origin != "" {
+		sources = appendNavigationOrigin(sources, origin)
+	}
+	if b.validateClientRedirectURI(redirectURI) == nil {
+		if origin := oauthNavigationOrigin(redirectURI); origin != "" {
+			sources = appendNavigationOrigin(sources, origin)
+		}
+	}
+	return "default-src 'none'; style-src 'unsafe-inline'; form-action " + strings.Join(sources, " ") + "; base-uri 'none'; frame-ancestors 'none'"
+}
+
+func oauthNavigationOrigin(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.User != nil {
+		return ""
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return ""
+	}
+	if parsed.Hostname() == "" || strings.ContainsAny(parsed.Host, " \t;'\"\\") {
+		return ""
+	}
+	return parsed.Scheme + "://" + parsed.Host
+}
+
+func appendNavigationOrigin(sources []string, origin string) []string {
+	for _, existing := range sources {
+		if existing == origin {
+			return sources
+		}
+	}
+	return append(sources, origin)
 }
 
 func (b *oauthBridge) renderConsoleCallbackError(w http.ResponseWriter, status int, title, message string) {

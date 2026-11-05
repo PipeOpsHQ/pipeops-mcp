@@ -955,8 +955,17 @@ func approveOAuthConsent(t *testing.T, serverURL, authorizeURL string) string {
 	if response.Header.Get("Location") != "" {
 		t.Fatal("authorization redirected before consent")
 	}
-	if !strings.Contains(response.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") {
-		t.Fatalf("consent CSP = %q", response.Header.Get("Content-Security-Policy"))
+	policy := response.Header.Get("Content-Security-Policy")
+	if !strings.Contains(policy, "frame-ancestors 'none'") || !strings.Contains(policy, "form-action 'self' https://console.pipeops.io") {
+		t.Fatalf("consent CSP = %q", policy)
+	}
+	if !strings.Contains(policy, "default-src 'none'") || strings.Contains(policy, "script-src") {
+		t.Fatalf("consent CSP = %q", policy)
+	}
+	if authorize, err := url.Parse(authorizeURL); err == nil {
+		if origin := oauthNavigationOrigin(authorize.Query().Get("redirect_uri")); origin != "" && !strings.Contains(policy, origin) {
+			t.Fatalf("consent CSP = %q, missing %s", policy, origin)
+		}
 	}
 	approved, err := noRedirect.PostForm(serverURL+"/oauth/authorize", url.Values{
 		"request_id": {hiddenInput(t, string(page), "request_id")},
@@ -1038,6 +1047,32 @@ func TestOAuthRedirectPolicyBlocksUntrustedHTTPSAndAllowsKnownMCPClients(t *test
 	}
 	if err := custom.validateClientRedirectURI("https://partner.example/oauth/callback/extra"); err == nil {
 		t.Fatal("exact URI allowlist matched a longer path")
+	}
+}
+
+func TestConsentContentSecurityPolicyAllowsConsoleAndTrustedRedirect(t *testing.T) {
+	bridge := newPolicyTestBridge(t, nil, nil)
+	policy := bridge.consentContentSecurityPolicy("https://claude.ai/api/mcp/auth_callback")
+	want := "default-src 'none'; style-src 'unsafe-inline'; form-action 'self' https://console.pipeops.test https://claude.ai; base-uri 'none'; frame-ancestors 'none'"
+	if policy != want {
+		t.Fatalf("policy = %q", policy)
+	}
+
+	omitted := bridge.consentContentSecurityPolicy("https://evil.example/steal")
+	if strings.Contains(omitted, "evil.example") || !strings.Contains(omitted, "https://console.pipeops.test") {
+		t.Fatalf("untrusted redirect policy = %q", omitted)
+	}
+
+	loopback := bridge.consentContentSecurityPolicy("http://127.0.0.1:8765/callback")
+	if !strings.Contains(loopback, "form-action 'self' https://console.pipeops.test http://127.0.0.1:8765;") {
+		t.Fatalf("loopback policy = %q", loopback)
+	}
+	if strings.Contains(loopback, "/callback") {
+		t.Fatalf("loopback policy includes a path: %q", loopback)
+	}
+
+	if oauthNavigationOrigin("javascript:alert(1)") != "" || oauthNavigationOrigin("https://user:pass@console.pipeops.io/auth") != "" {
+		t.Fatal("unsafe navigation origin was accepted")
 	}
 }
 
