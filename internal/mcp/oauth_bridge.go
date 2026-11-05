@@ -26,7 +26,8 @@ import (
 )
 
 const (
-	oauthAuthorizationRequestTTL = 10 * time.Minute
+	// Covers Console sign-in and OTP before the browser returns to the callback.
+	oauthAuthorizationRequestTTL = 30 * time.Minute
 	oauthAuthorizationCodeTTL    = 5 * time.Minute
 	oauthAccessTokenTTL          = 15 * time.Minute
 	oauthRefreshTokenTTL         = 30 * 24 * time.Hour
